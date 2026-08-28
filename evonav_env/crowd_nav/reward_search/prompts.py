@@ -1,0 +1,241 @@
+"""
+EvoNav Appendix D prompt templates (arXiv:2605.11859).
+
+Ported literally from Appendix D.1–D.5, with one intentional adaptation:
+the generated function signature is ``compute_reward(state)`` over our
+``RewardState`` (Phase 1 sandbox contract) instead of the paper's
+``cal_reward`` / ``compute_reward(inst, traj)``. All other wording is
+preserved for prompt fidelity.
+"""
+
+from __future__ import annotations
+
+# ---------------------------------------------------------------------------
+# D.1 Initial Population
+# ---------------------------------------------------------------------------
+
+D1_SYSTEM_PROMPT = (
+    "You are an expert in reinforcement learning and robot navigation. "
+    "Your goal is to design reward functions that effectively guide a robot "
+    "toward safe, efficient, and socially compliant navigation behaviors. "
+    "Return **only** valid Python code enclosed within a fenced code block. "
+    "The code must be fully executable and should not include comments or "
+    "explanations outside the block."
+)
+
+# {func_name} defaults to compute_reward; interface adapted to RewardState.
+D1_USER_PROMPT = """Please write a Python function named {func_name} for a robot navigation task in a crowded environment.
+Task Description:
+- The function's goal is to output a scalar reward value based on the robot's current state, guiding it to its goal while avoiding collisions with dynamic human agents.
+Function Interface:
+- Inputs:
+  - state: A RewardState snapshot for the current frame with fields:
+    - state.robot: px, py, vx, vy, radius, gx, gy, v_pref
+    - state.humans: tuple of nearby humans (px, py, vx, vy, radius) within sensor range
+    - state.dmin: closest human distance minus radii
+    - state.discomfort_dist, state.collision, state.reaching_goal, state.timeout
+    - state.action, state.time_step, state.global_time, state.time_limit
+- Output:
+  - A single scalar (float) representing the reward for the current state or action.
+Design Principles:
+- Goal-Progress: The function should reward progress toward the robot goal.
+- Collision Avoidance: The function must penalize states that are too close to humans or result in a collision.
+- Interpretability: The code should be well-commented, and variable names should be clear to facilitate human understanding.
+Constraints (CRITICAL):
+- Hyperparameters: All tuning parameters (e.g., weights, constants) must be defined as local variables inside the function body. Do not add them as function arguments.
+- Signature: Define exactly one function: def {func_name}(state): ... that returns a finite float.
+- Output Format: Your response must contain only the Python function within a single code block. Do not include any explanatory text or print statements.
+{seed_block}
+{reflection_block}
+{external_knowledge_block}
+"""
+
+# ---------------------------------------------------------------------------
+# D.2 Evolutionary Operations
+# ---------------------------------------------------------------------------
+
+D2_CROSSOVER_PROMPT = """You are a reward function architect. Your task is to synthesize a new function by combining the complementary strengths of two parent functions. Below are two candidate reward functions and a textual reflection. Use them to synthesize an improved hybrid design that combines the strengths of both functions while addressing weaknesses noted in the reflection.
+Parent A:
+- {code_A}
+Parent B:
+- {code_B}
+Reflection:
+- {reflection}.
+Synthesis Task:
+- Based on the provided reflection, write a new, improved function `{func_name}` that merges the superior safety features from Parent A with the efficiency-promoting logic from Parent B.
+- Define exactly one function: def {func_name}(state): ... returning a finite float.
+- Return only a single Python fenced code block.
+"""
+
+D2_MUTATION_PROMPT = """You are a reward function optimizer. Your task is to perform a targeted mutation on a high-performing function to address a specific weakness identified in the reflection. A prior reflection summarizing performance feedback is provided below. Use it to locally improve the current elite reward function by small, targeted edits that preserve its strengths while addressing weaknesses.
+Prior Reflection:
+- {reflection}
+High-Performing Code to Mutate:
+- {func_signature}
+- {elitist_code}
+Mutation Task:
+- Based on the reflection, create a mutated function `{func_name}`. Make a minimal, precise change to the code to address the identified weakness without degrading its existing strengths.
+- Define exactly one function: def {func_name}(state): ... returning a finite float.
+- Return only a single Python fenced code block.
+"""
+
+# ---------------------------------------------------------------------------
+# D.3 Reward Function Refinement (Stages II/III; kept for completeness)
+# ---------------------------------------------------------------------------
+
+D3_SYSTEM_PROMPT = (
+    "You are a senior researcher in robot motion planning and reinforcement learning. "
+    "Rewrite the provided reward function to produce a smooth, dense, and numerically "
+    "stable per-frame signal that differentiates between successful, safe, and "
+    "inefficient navigation behaviors. "
+    "Requirements: "
+    "- Keep the original function signature. "
+    "- Maintain O(T) computational complexity. "
+    "- Ensure bounded reward magnitudes and graceful handling of incomplete trajectories. "
+    "- Output only valid Python code (no markdown fences or commentary)."
+)
+
+D3_USER_PROMPT = """Current score (best so far): {last_score:.4f} (higher is better, approx. range -1 to 1)
+Core components to ensure (abstract, unordered):
+- Progressive advancement signal
+- Safety differentiation
+- Terminal / completion handling
+- Efficiency (avoid needless detours)
+- Stability (avoid erratic frame jumps)
+Guidelines:
+Strengthen discrimination between clearly successful, safe, efficient progress and poor / unsafe / stagnant behavior. Maintain:
+- Dense per-frame shaping (not a single terminal spike)
+- Bounded, numerically stable magnitudes (avoid runaway growth)
+- Graceful handling of incomplete trajectories
+Discourage unsafe or aimless motion and excessive oscillation without over-penalizing reasonable detours. Keep the logic straightforward and linear-time.
+Keep all existing effective terms (progress-to-goal, safety distance shaping, smoothness, efficiency) unless there is a concrete numerical reason to adjust them.
+Make only minimal, localized changes that strictly improve discriminative sharpness without removing previously working logic.
+Avoid producing nearly constant rewards across different frames or trajectories; variance should reflect qualitative behavioral differences.
+Focus note: {feedback}
+{extra_context_if_any}
+Revise the function below.
+Maintain the original signature and return a meaningful per-frame shaping signal aggregated appropriately.
+Return **only** the updated function definition (no additional text).
+{current_code}
+"""
+
+# ---------------------------------------------------------------------------
+# D.4 External Knowledge
+# ---------------------------------------------------------------------------
+
+D4_EXTERNAL_KNOWLEDGE = """# External Knowledge for Reward Function Design
+## Task Definition
+- Domain: Crowd-robot navigation in continuous 2D environments
+- Dataset: Synthetic environments derived from popular benchmarks, where human agents follow realistic social trajectories
+- Input:
+  - Current robot position (x_t, y_t)
+  - Goal position g = (x_g, y_g)
+  - Human positions {p_h(t)} within the robot's observation field
+- Output:
+  - A **reward function** r that maps each navigation state to a scalar reward signal used to train reinforcement learning policies (e.g., PPO)
+- Objective:
+  - Encourage goal-directed progress
+  - Penalize collisions and unsafe proximity
+  - Promote smooth, efficient, and socially compliant motion
+## Evaluation Metrics
+- SR (Success Rate): Percentage of episodes where the robot successfully reaches the goal within the time limit
+- CR (Collision Rate): Percentage of episodes involving collisions with humans or obstacles
+- TR (Timeout Rate): Percentage of episodes where the robot fails to reach the goal within the time limit
+- NT (Navigation Time): Average time taken to reach the goal in successful episodes
+- PL (Path Length): Average total distance traveled, including during collisions and timeouts
+- ITR (Intrusion Time Ratio): Fraction of time the robot intrudes into humans' predicted positions, triggering danger events
+- SD (Social Distance): Average minimum distance between the robot and nearby humans during navigation
+"""
+
+# ---------------------------------------------------------------------------
+# D.5 Seed Function (adapted to compute_reward(state) / RewardState)
+# ---------------------------------------------------------------------------
+
+D5_SEED_FUNCTION = '''def compute_reward(state):
+    """CrowdNav++-style seed (Appendix D.5), adapted to RewardState."""
+    success_reward = 10.0
+    collision_penalty = -20.0
+    pot_factor = 2.0
+    if state.reaching_goal:
+        return float(success_reward)
+    if state.collision:
+        return float(collision_penalty)
+    # Potential-style progress toward goal (dense shaping).
+    dist = ((state.robot.px - state.robot.gx) ** 2 + (state.robot.py - state.robot.gy) ** 2) ** 0.5
+    return float(pot_factor * (-dist))
+'''
+
+
+def format_d1_initial(
+    *,
+    func_name: str = "compute_reward",
+    include_seed: bool = True,
+    include_external_knowledge: bool = True,
+    reflection: str = "",
+) -> str:
+    """Build the D.1 user prompt (system prompt is separate)."""
+    seed_block = ""
+    if include_seed:
+        seed_block = (
+            "Seed function (perturb / diversify; do not copy verbatim unless useful):\n"
+            "```python\n"
+            f"{D5_SEED_FUNCTION.rstrip()}\n"
+            "```\n"
+        )
+    reflection_block = ""
+    if reflection.strip():
+        reflection_block = f"Reflective guidance from prior generations:\n{reflection.strip()}\n"
+    external_block = ""
+    if include_external_knowledge:
+        external_block = f"External knowledge:\n{D4_EXTERNAL_KNOWLEDGE}\n"
+    return D1_USER_PROMPT.format(
+        func_name=func_name,
+        seed_block=seed_block,
+        reflection_block=reflection_block,
+        external_knowledge_block=external_block,
+    )
+
+
+def format_d2_crossover(
+    code_a: str,
+    code_b: str,
+    reflection: str,
+    *,
+    func_name: str = "compute_reward",
+) -> str:
+    return D2_CROSSOVER_PROMPT.format(
+        code_A=code_a.rstrip(),
+        code_B=code_b.rstrip(),
+        reflection=reflection.strip() or "(none)",
+        func_name=func_name,
+    )
+
+
+def format_d2_mutation(
+    elitist_code: str,
+    reflection: str,
+    *,
+    func_name: str = "compute_reward",
+    func_signature: str = "def compute_reward(state):",
+) -> str:
+    return D2_MUTATION_PROMPT.format(
+        reflection=reflection.strip() or "(none)",
+        func_signature=func_signature,
+        elitist_code=elitist_code.rstrip(),
+        func_name=func_name,
+    )
+
+
+def format_d3_refinement(
+    current_code: str,
+    *,
+    last_score: float,
+    feedback: str = "",
+    extra_context_if_any: str = "",
+) -> str:
+    return D3_USER_PROMPT.format(
+        last_score=float(last_score),
+        feedback=feedback.strip() or "(none)",
+        extra_context_if_any=extra_context_if_any,
+        current_code=current_code.rstrip(),
+    )

@@ -1,0 +1,172 @@
+#!/usr/bin/env python
+"""
+Single entry point for EvoNav Algorithm 1 (faithful replication baseline).
+
+  seed generation → Stage I → Stage II → Stage III
+
+No AMFRS mechanisms (novelty archive, Pareto ranking, adaptive controller).
+
+Examples (from ``evonav_env/`` with the project venv)::
+
+    # Seconds-scale dry run (stub trainers + seed LLM)
+    python scripts/run_evonav.py --fast --output-dir results/evonav_fast
+
+    # Practical local run (real trainers, reduced Stage III K3)
+    python scripts/run_evonav.py --llm seed --output-dir results/evonav_local
+
+    # Paper-faithful Stage III budget on a GPU cluster
+    python scripts/run_evonav.py --llm vllm --stage3-train-steps 10000000 \\
+        --device cuda --output-dir results/evonav_paper
+"""
+
+from __future__ import annotations
+
+import argparse
+import logging
+import os
+import sys
+
+_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+if _ROOT not in sys.path:
+    sys.path.insert(0, _ROOT)
+os.chdir(_ROOT)
+
+
+def main() -> int:
+    from crowd_nav.reward_search.pipeline import EvoNavPipeline, EvoNavRunConfig
+    from crowd_nav.reward_search.stage3 import STAGE3_PAPER_STEPS, STAGE3_STEPS
+
+    parser = argparse.ArgumentParser(description="EvoNav Algorithm 1 end-to-end")
+    parser.add_argument("--output-dir", type=str, default="results/evonav_run")
+    parser.add_argument("--seed", type=int, default=425)
+    parser.add_argument(
+        "--llm",
+        type=str,
+        default="seed",
+        choices=["seed", "groq", "vllm", "scripted"],
+        help="LLM provider (seed = local D.5 variants, no API key)",
+    )
+    parser.add_argument(
+        "--score1",
+        type=str,
+        default="dataset",
+        choices=["dataset", "smoke"],
+        help="Stage I scorer: dataset=Score1 on pre-collected trajs; smoke=fast-test only",
+    )
+    parser.add_argument(
+        "--stage1-dataset",
+        type=str,
+        default="data/stage1_dataset",
+        help="Path from scripts/collect_stage1_dataset.py",
+    )
+    parser.add_argument("--fast", action="store_true", help="Stub trainers + smoke Score1")
+    parser.add_argument(
+        "--scale",
+        type=str,
+        default=None,
+        choices=["paper"],
+        help=(
+            "Named budget preset. 'paper' redirects to scripts/run_evonav_paper_scale.py "
+            "(Tables 3–6, multi-seed); not used by pytest."
+        ),
+    )
+    parser.add_argument("--device", type=str, default="cpu", choices=["cpu", "cuda"])
+    parser.add_argument(
+        "--regime",
+        type=str,
+        default="without_random",
+        choices=["without_random", "with_random", "both"],
+        help="EVOLUTION_RANDOMIZATION_REGIME (AUDIT.md §8.1; default without_random)",
+    )
+
+    parser.add_argument("--stage1-population", type=int, default=8)
+    parser.add_argument("--stage1-generations", type=int, default=10)
+
+    parser.add_argument("--stage2-rounds", type=int, default=16)
+    parser.add_argument("--stage2-train-steps", type=int, default=8000)
+    parser.add_argument("--stage2-eval-episodes", type=int, default=50)
+    parser.add_argument("--stage2-stub", action="store_true")
+
+    parser.add_argument(
+        "--stage3-train-steps",
+        type=int,
+        default=STAGE3_STEPS,
+        help=f"K3 env steps (default={STAGE3_STEPS}; paper={STAGE3_PAPER_STEPS})",
+    )
+    parser.add_argument("--stage3-rounds", type=int, default=3)
+    parser.add_argument("--stage3-eval-episodes", type=int, default=500)
+    parser.add_argument("--stage3-stub", action="store_true")
+    parser.add_argument("--no-h-sweep", action="store_true")
+
+    args = parser.parse_args()
+
+    if args.scale == "paper":
+        # Multi-seed paper budgets live in a dedicated human-triggered script.
+        print(
+            "Paper-scale (Tables 3–6, multi-seed) is only available via:\n"
+            "  python scripts/run_evonav_paper_scale.py\n"
+            "Pass --seeds / --device there. This keeps pytest/--fast unchanged "
+            "and avoids accidental CI runs of K3=1e7.",
+            file=sys.stderr,
+        )
+        return 2
+
+    # Protect Config.get_args() class-body from our CLI flags.
+    sys.argv = [sys.argv[0], "--no-cuda" if args.device == "cpu" else "--seed", str(args.seed)]
+
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(message)s",
+        datefmt="%H:%M:%S",
+    )
+
+    import crowd_sim  # noqa: F401
+
+    cfg = EvoNavRunConfig(
+        output_dir=args.output_dir,
+        seed=args.seed,
+        llm_provider=args.llm,
+        score1_mode="smoke" if args.fast else args.score1,
+        stage1_dataset_path=args.stage1_dataset,
+        stage1_population=args.stage1_population,
+        stage1_generations=args.stage1_generations,
+        stage2_rounds=args.stage2_rounds,
+        stage2_train_steps=args.stage2_train_steps,
+        stage2_eval_episodes=args.stage2_eval_episodes,
+        stage2_use_stub=args.stage2_stub or args.fast,
+        stage3_rounds=args.stage3_rounds,
+        stage3_train_steps=args.stage3_train_steps,
+        stage3_eval_episodes=args.stage3_eval_episodes,
+        stage3_use_stub=args.stage3_stub or args.fast,
+        stage3_run_h_sweep=not args.no_h_sweep,
+        device=args.device,
+        randomization_regime=args.regime,
+        predict_method="none" if args.fast else "inferred",
+    )
+    if args.regime == "both":
+        print(
+            "regime=both requires two separate full Algorithm-1 passes "
+            "(doubled budget). Use --regime without_random or with_random.",
+            file=sys.stderr,
+        )
+        return 2
+    if args.fast:
+        cfg.apply_fast_profile()
+        cfg.output_dir = args.output_dir
+        cfg.seed = args.seed
+
+    logging.info(
+        "EvoNav Algorithm 1 → %s (fast=%s, K3=%d, paper_K3=%d)",
+        cfg.output_dir,
+        cfg.fast,
+        cfg.stage3_train_steps,
+        STAGE3_PAPER_STEPS,
+    )
+    artifacts = EvoNavPipeline(cfg).run()
+    logging.info("Done. Final candidate: %s", artifacts.best_stage3.candidate_id)
+    logging.info("Artifacts: %s", artifacts.output_dir)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
