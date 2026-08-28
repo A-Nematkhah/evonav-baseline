@@ -24,7 +24,8 @@ cd evonav_env
 python -m venv .venv
 # Windows: .venv\Scripts\activate
 pip install -r requirements_pinned.txt
-# Install PyTorch 1.12.1 per evonav_env/README.md
+pip install -e ../baselines_openai
+# Install PyTorch 1.12.1 and Python-RVO2 per evonav_env/README.md
 
 # Fast wiring test (~seconds)
 python scripts/run_evonav.py --fast --output-dir results/evonav_fast
@@ -33,6 +34,9 @@ python scripts/run_evonav.py --fast --output-dir results/evonav_fast
 pytest crowd_nav/reward_search/tests -m "not slow"
 pytest crowd_nav/reward_search/tests -m slow   # real simulator collect smoke
 ```
+
+`baselines_openai/` is vendored OpenAI Baselines (MIT). It must be installed editable
+as shown above so `from baselines import ...` resolves in `evonav_env/rl/`.
 
 See **`evonav_env/README_EVONAV.md`** for Algorithm 1, paper-scale runs, and API keys.
 
@@ -60,4 +64,4 @@ Copy `evonav_env/groq_keys.json.example` → `evonav_env/groq_keys.json` (gitign
 
 ## Pre-publish audit
 
-See **`PRE_PUBLISH_REPORT.md`** before making this repository public.
+See **`PRE_PUBLISH_REPORT.md`** for the pre-publish audit history. Post-release fixes are in **`POST_PUBLISH_FIXES.md`**.

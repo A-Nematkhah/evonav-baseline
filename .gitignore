@@ -21,6 +21,6 @@ __pycache__/
 .pytest_cache/
 .DS_Store
 
-# Python-RVO2 build outputs
-Python-RVO2/build/
-Python-RVO2/mybuild/
+# Vendored OpenAI Baselines build artifacts
+baselines_openai/*.egg-info/
+baselines_openai/baselines.egg-info/
