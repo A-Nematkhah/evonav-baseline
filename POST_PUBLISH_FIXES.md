@@ -1,7 +1,7 @@
 # Post-publish fixes
 
-**Repo:** EvoNav faithful-replication baseline (public)  
-**Report date:** 2026-08-28
+**Repo:** [evonav-baseline](https://github.com/A-Nematkhah/evonav-baseline) (public)  
+**Report date:** 2026-08-28 (updated 2026-08-31)
 
 ---
 
@@ -18,13 +18,13 @@ ModuleNotFoundError: No module named 'baselines'
 from `evonav_env/rl/networks/{dummy_vec_env,envs,shmem_vec_env}.py` and
 `evonav_env/rl/vec_env/{vec_normalize,logger}.py` (via `baselines.common.*`).
 
-**Fix (commit pending verification):**
+**Fix (commit `634ae35`):**
 - Removed nested `.git` from `baselines_openai/`
 - Replaced gitlink with full vendored OpenAI Baselines source (upstream commit
   `ea25b9e8`, MIT — see `baselines_openai/LICENSE` and `baselines_openai/NOTICE.md`)
-- Documented install step: `pip install -e ../baselines_openai` from `evonav_env/`
-
-**Verification:** See § Verification below.
+- Documented install: `pip install tensorflow` then `pip install -e ../baselines_openai`
+  (TensorFlow required because upstream `setup.py` asserts it at install time)
+- Added `tensorflow==2.11.0` to `evonav_env/requirements_pinned.txt` (follow-up commit)
 
 ---
 
@@ -35,7 +35,7 @@ from `evonav_env/rl/networks/{dummy_vec_env,envs,shmem_vec_env}.py` and
 `rvo2-navmesh-test.blend`. The simulator imports the **`rvo2` pip package**
 (`crowd_sim/envs/crowd_sim.py`, `crowd_nav/policy/orca.py`), not this vendored tree.
 
-**Fix:**
+**Fix (commit `634ae35`):**
 - `git rm -r Python-RVO2/`
 - Install instructions unchanged in `evonav_env/README.md` step 4:
   [Python-RVO2](https://github.com/sybrenstuvel/Python-RVO2)
@@ -49,18 +49,27 @@ now points to `PRE_PUBLISH_REPORT.md` (audit history) and this file.
 
 ---
 
-## Verification (fresh clone)
+## Verification (fresh clone, 2026-08-31)
 
-_Placeholder — updated after clean-clone test completes._
+Clean temp clone from local repo (`git clone` → new directory, not reused checkout):
 
-| Step | Command | Result |
-|------|---------|--------|
-| Clean clone | `git clone <repo> /tmp/evonav_verify` | |
-| Baselines imports | `pip install -e ../baselines_openai` + import smoke | |
-| Fast pipeline | `python scripts/run_evonav.py --fast` | |
+| Step | Result |
+|------|--------|
+| `baselines_openai/setup.py` present after clone | **PASS** (was empty gitlink before fix) |
+| `Python-RVO2/` absent after clone | **PASS** |
+| `pip install -r requirements_pinned.txt` + `pip install -e ../baselines_openai` + `pip install torch==1.12.1` | **PASS** (with `tensorflow` in pinned requirements) |
+| Baselines import smoke: `from rl.networks.envs import make_vec_envs` | **PASS** |
+| Fast pipeline: `python scripts/run_evonav.py --fast` | **PASS** (completed Stage I–III, artifacts written) |
+
+**Note:** `train.py` additionally requires PyTorch, Python-RVO2, and GST checkpoints
+per `evonav_env/README.md`; the baselines import path above is the specific regression
+fixed by flattening `baselines_openai`.
 
 ---
 
-## Commit
+## Commits
 
-_Fill in commit hash after push._
+| Hash | Description |
+|------|-------------|
+| `634ae35` | Flatten `baselines_openai`; remove `Python-RVO2/` |
+| _(follow-up)_ | Pin TensorFlow; doc install order; this report |

@@ -11,6 +11,7 @@ cd evonav_env
 python -m venv .venv
 .venv\Scripts\activate          # Windows
 pip install -r requirements_pinned.txt
+pip install tensorflow
 pip install -e ../baselines_openai
 pip install groq                # only if using --llm groq
 # PyTorch 1.12.1 + Python-RVO2: see main README.md

@@ -8,9 +8,11 @@ This directory contains a vendored copy of [OpenAI Baselines](https://github.com
 - **Used by:** `evonav_env/rl/networks/` and `evonav_env/rl/vec_env/` for `VecEnv`,
   `VecNormalize`, logging, and related PPO training utilities.
 
-Install into your virtual environment (from repo root):
+Install into your virtual environment (from repo root; **TensorFlow must be
+installed first** — `setup.py` asserts it at install time):
 
 ```bash
+pip install tensorflow
 pip install -e baselines_openai
 ```
 

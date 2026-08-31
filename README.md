@@ -24,6 +24,7 @@ cd evonav_env
 python -m venv .venv
 # Windows: .venv\Scripts\activate
 pip install -r requirements_pinned.txt
+pip install tensorflow
 pip install -e ../baselines_openai
 # Install PyTorch 1.12.1 and Python-RVO2 per evonav_env/README.md
 
