@@ -72,4 +72,4 @@ fixed by flattening `baselines_openai`.
 | Hash | Description |
 |------|-------------|
 | `634ae35` | Flatten `baselines_openai`; remove `Python-RVO2/` |
-| _(follow-up)_ | Pin TensorFlow; doc install order; this report |
+| `2c2ba74` | Pin TensorFlow; doc install order; update this report |
