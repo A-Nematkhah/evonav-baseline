@@ -203,7 +203,14 @@ def _stage2_train_argv(
         out_dir,
         "--overwrite",
     ]
-    if config.device == "cpu":
+    # Policy code checks ``args.no_cuda`` (not ``args.cuda``) for tensor placement.
+    if config.device != "cuda" or not torch.cuda.is_available():
+        if config.device == "cuda" and not torch.cuda.is_available():
+            logger.warning(
+                "Stage II: --device cuda requested but PyTorch has no CUDA "
+                "(version=%s); forcing --no-cuda.",
+                torch.__version__,
+            )
         argv.append("--no-cuda")
     return argv
 

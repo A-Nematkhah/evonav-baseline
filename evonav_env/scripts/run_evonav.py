@@ -39,11 +39,12 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="EvoNav Algorithm 1 end-to-end")
     parser.add_argument("--output-dir", type=str, default="results/evonav_run")
     parser.add_argument("--seed", type=int, default=425)
+    parser.add_argument("--llm-model", type=str, default=None)
     parser.add_argument(
         "--llm",
         type=str,
         default="seed",
-        choices=["seed", "groq", "vllm", "scripted"],
+        choices=["seed", "groq", "vllm", "ollama", "scripted"],
         help="LLM provider (seed = local D.5 variants, no API key)",
     )
     parser.add_argument(
@@ -126,6 +127,7 @@ def main() -> int:
         output_dir=args.output_dir,
         seed=args.seed,
         llm_provider=args.llm,
+        llm_model=args.llm_model,
         score1_mode="smoke" if args.fast else args.score1,
         stage1_dataset_path=args.stage1_dataset,
         stage1_population=args.stage1_population,

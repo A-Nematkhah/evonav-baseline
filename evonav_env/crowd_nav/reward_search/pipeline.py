@@ -46,7 +46,8 @@ class EvoNavRunConfig:
 
     output_dir: str = "results/evonav_run"
     seed: int = 425
-    llm_provider: str = "seed"  # seed | groq | vllm | scripted
+    llm_provider: str = "seed"  # seed | groq | vllm | ollama | scripted
+    llm_model: Optional[str] = None
     # Stage I Score1: "dataset" (default, paper) | "smoke" (opt-in fast tests only)
     score1_mode: str = "dataset"
     stage1_dataset_path: str = "data/stage1_dataset"
@@ -132,7 +133,9 @@ class EvoNavPipeline:
     def _build_llm(self) -> LLMClient:
         if self.llm is not None:
             return self.llm
-        return make_llm_client(self.config.llm_provider)
+        if self.config.llm_model is None:
+            return make_llm_client(self.config.llm_provider)
+        return make_llm_client(self.config.llm_provider, model=self.config.llm_model)
 
     def _score_fn(self):
         mode = str(self.config.score1_mode).strip().lower()
@@ -256,7 +259,11 @@ class EvoNavPipeline:
                 n_random=2,
             )
         evolver = StageIEvolver(
-            llm, score_fn=self._score_fn(), validator=self.validator, config=s1_cfg
+            llm,
+            score_fn=self._score_fn(),
+            validator=self.validator,
+            config=s1_cfg,
+            rejection_log_path=os.path.join(cfg.output_dir, "stage1_rejections.jsonl"),
         )
         stage1_pop = evolver.run()
         best_s1 = stage1_pop[0]

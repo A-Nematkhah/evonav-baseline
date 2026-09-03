@@ -31,6 +31,7 @@ from typing import Any, List, Optional, Tuple
 logger = logging.getLogger(__name__)
 
 COOLDOWN_SECONDS = 60
+DEFAULT_MIN_REQUEST_INTERVAL = float(os.environ.get("GROQ_MIN_REQUEST_INTERVAL", "3.0"))
 _PLACEHOLDER_PREFIXES = ("gsk_REPLACE", "gsk_your_", "YOUR_KEY")
 
 _EVONAV_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
@@ -50,6 +51,80 @@ def _is_placeholder_key(key: str) -> bool:
     if not k:
         return True
     return any(k.startswith(p) for p in _PLACEHOLDER_PREFIXES)
+
+
+def _response_headers(response: Any) -> dict:
+    """Best-effort extraction of HTTP headers from a Groq SDK response."""
+    raw = getattr(response, "_response", None) or getattr(response, "response", None)
+    if raw is None:
+        return {}
+    headers = getattr(raw, "headers", None)
+    if headers is None:
+        return {}
+    try:
+        return {str(k).lower(): v for k, v in dict(headers).items()}
+    except Exception:  # noqa: BLE001
+        return {}
+
+
+class GroqRateLimitPacer:
+    """
+    Proactive spacing between Groq requests using min-interval + response headers.
+
+    Observes ``retry-after`` and ``x-ratelimit-remaining-*`` when present so Gen0
+    batching does not spend most of its wall time in reactive 429 backoff.
+    """
+
+    def __init__(self, *, min_interval_seconds: float = DEFAULT_MIN_REQUEST_INTERVAL) -> None:
+        self.min_interval_seconds = max(0.0, float(min_interval_seconds))
+        self._last_request_at = 0.0
+        self._hold_until = 0.0
+
+    def wait_turn(self) -> None:
+        now = time.time()
+        target = max(self._last_request_at + self.min_interval_seconds, self._hold_until)
+        if now < target:
+            delay = target - now
+            logger.info("Groq pacing: sleeping %.2fs before request", delay)
+            time.sleep(delay)
+        self._last_request_at = time.time()
+
+    def observe_response(self, response: Any) -> None:
+        headers = _response_headers(response)
+        if not headers:
+            return
+        retry_after = headers.get("retry-after") or headers.get("retry_after")
+        if retry_after is not None:
+            try:
+                self._hold_until = max(self._hold_until, time.time() + float(retry_after))
+            except (TypeError, ValueError):
+                pass
+        for key in (
+            "x-ratelimit-remaining-requests",
+            "x-ratelimit-remaining-tokens",
+            "x-ratelimit-remaining-tokens-day",
+        ):
+            remaining = headers.get(key)
+            if remaining is None:
+                continue
+            try:
+                if int(remaining) <= 1:
+                    self._hold_until = max(
+                        self._hold_until,
+                        time.time() + self.min_interval_seconds * 2.0,
+                    )
+            except (TypeError, ValueError):
+                continue
+
+
+_pacer_singleton: Optional[GroqRateLimitPacer] = None
+
+
+def get_groq_pacer() -> GroqRateLimitPacer:
+    global _pacer_singleton
+    if _pacer_singleton is None:
+        _pacer_singleton = GroqRateLimitPacer()
+    return _pacer_singleton
 
 
 def resolve_groq_keys_path() -> str:
@@ -123,7 +198,7 @@ class GroqKeyManager:
         from groq import Groq
 
         key = self._select_available_key()
-        return Groq(api_key=key), key
+        return Groq(api_key=key, max_retries=0), key
 
     def chat_completion(self, **kwargs: Any) -> Any:
         """
@@ -131,14 +206,26 @@ class GroqKeyManager:
 
         Tries each key in the pool on rate-limit errors; other errors propagate.
         """
+        pacer = get_groq_pacer()
         last_exception: Optional[Exception] = None
         for _ in range(len(self.keys)):
+            pacer.wait_turn()
             client, key = self.get_client()
             try:
-                return client.chat.completions.create(**kwargs)
+                response = client.chat.completions.create(**kwargs)
+                pacer.observe_response(response)
+                return response
             except Exception as exc:  # noqa: BLE001
                 last_exception = exc
                 if _is_rate_limit_error(exc):
+                    retry_after = getattr(exc, "retry_after", None)
+                    if retry_after is not None:
+                        try:
+                            pacer._hold_until = max(
+                                pacer._hold_until, time.time() + float(retry_after)
+                            )
+                        except (TypeError, ValueError):
+                            pass
                     self._mark_rate_limited(key)
                     self._advance()
                     continue

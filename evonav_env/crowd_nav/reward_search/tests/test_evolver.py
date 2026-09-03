@@ -66,8 +66,10 @@ def test_prompt_templates_contain_appendix_anchors():
     assert "def compute_reward(state)" in D5_SEED_FUNCTION
     cross = format_d2_crossover("codeA", "codeB", "note")
     assert "codeA" in cross and "codeB" in cross
+    assert "getattr" in cross and "state.robot.px" in cross
     mut = format_d2_mutation("elitist", "weakness")
     assert "elitist" in mut and "weakness" in mut
+    assert "getattr" in mut
 
 
 def test_scripted_generate_n():
@@ -85,8 +87,9 @@ def test_make_llm_client_scripted():
 
 
 def test_stage_i_builds_n8_and_runs_one_generation():
-    # Gen0: 8 valids. Gen1: 8 valids. Distinct returns for ranking.
-    completions = [_valid_code(float(i)) for i in range(8, 0, -1)]
+    # Gen0: batch (8 funcs in one reply) + regen if needed. Gen1: 8 valids.
+    batch_body = "\n\n".join(_valid_code(float(i)) for i in range(8, 0, -1))
+    completions = [batch_body]
     completions += [_valid_code(float(i) + 0.5) for i in range(8, 0, -1)]
     client = ScriptedLLMClient(completions)
     evolver = StageIEvolver(
@@ -121,31 +124,44 @@ def test_stage_i_builds_n8_and_runs_one_generation():
 
 
 def test_gen0_replaces_invalid_with_extra_draws():
-    # Two invalids first, then 8 valids — mirrors "generate extras to replace invalid".
-    completions = [_invalid_import_code(), _invalid_import_code()]
+    # Batch call returns one invalid; regen draws replace until 8 valids.
+    batch_invalid = _invalid_import_code()
+    completions = [batch_invalid]
+    completions += [_invalid_import_code()]
     completions += [_valid_code(float(i)) for i in range(1, 9)]
     client = ScriptedLLMClient(completions)
-    evolver = StageIEvolver(
-        client,
-        score_fn=_score_by_smoke,
-        config=StageIConfig(
-            population_size=8,
-            generations=0,  # only Gen0 via initialize + score in run...
-            n_crossover=2,
-            n_mutation=4,
-            n_random=2,
-            max_invalid_replacements=8,
-        ),
-    )
-    # generations=0 still runs Gen0 then range(1,1) empty.
-    final = evolver.run()
-    assert len(final) == 8
-    assert all(c.valid for c in final)
-    assert client.remaining == 0  # 2 invalid + 8 valid consumed
+    import tempfile
+    import json
+    import os
+
+    with tempfile.TemporaryDirectory() as tmp:
+        log_path = os.path.join(tmp, "stage1_rejections.jsonl")
+        evolver = StageIEvolver(
+            client,
+            score_fn=_score_by_smoke,
+            config=StageIConfig(
+                population_size=8,
+                generations=0,
+                n_crossover=2,
+                n_mutation=4,
+                n_random=2,
+                max_invalid_replacements=8,
+            ),
+            rejection_log_path=log_path,
+        )
+        final = evolver.run()
+        assert len(final) == 8
+        assert all(c.valid for c in final)
+        assert os.path.isfile(log_path)
+        rows = [json.loads(line) for line in open(log_path, encoding="utf-8")]
+        rejected = [r for r in rows if not r["accepted"]]
+        assert len(rejected) >= 2
+        assert all(r["rejection_category"] == "forbidden_import" for r in rejected)
 
 
 def test_mutation_uses_lower_performer_and_crossover_uses_top2():
-    completions = [_valid_code(float(i)) for i in range(8, 0, -1)]  # Gen0
+    batch_body = "\n\n".join(_valid_code(float(i)) for i in range(8, 0, -1))
+    completions = [batch_body]
     # Track prompts indirectly via distinct next-gen codes.
     completions += [_valid_code(100.0)] * 2  # crossover slots
     completions += [_valid_code(50.0)] * 4  # mutation slots

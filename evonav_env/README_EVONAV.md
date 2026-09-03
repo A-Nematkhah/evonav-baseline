@@ -19,6 +19,27 @@ pip install groq                # only if using --llm groq
 
 Use **only** this `.venv` — do not merge with `mobile_robot_env`.
 
+## Ollama (local, no API key)
+
+For predictable latency, use the non-thinking model variant:
+
+```bash
+ollama pull frob/qwen3.5-instruct:4b
+```
+
+The default Ollama model is the reasoning model `qwen3.5:4b`, which can emit
+`<think>` content before the code fence. If using it explicitly:
+
+```bash
+ollama pull qwen3.5:4b
+python scripts/run_evonav.py --llm ollama --llm-model qwen3.5:4b --output-dir results/ollama_run
+```
+
+The server URL defaults to `http://localhost:11434/v1`; override it with
+`OLLAMA_BASE_URL`. If Gen0 rejection rates are unexpectedly high, inspect
+`results/.../gen0_rejections.jsonl` for the truncation-specific
+`no closing code fence found` error before assuming a sandbox problem.
+
 ## API keys (Groq)
 
 1. Copy `groq_keys.json.example` → `groq_keys.json`

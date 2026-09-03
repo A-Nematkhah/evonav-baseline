@@ -247,7 +247,13 @@ def _stage3_train_argv(
         out_dir,
         "--overwrite",
     ]
-    if config.device == "cpu":
+    if config.device != "cuda" or not torch.cuda.is_available():
+        if config.device == "cuda" and not torch.cuda.is_available():
+            logger.warning(
+                "Stage III: --device cuda requested but PyTorch has no CUDA "
+                "(version=%s); forcing --no-cuda.",
+                torch.__version__,
+            )
         argv.append("--no-cuda")
     return argv
 

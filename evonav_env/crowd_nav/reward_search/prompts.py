@@ -44,6 +44,7 @@ Design Principles:
 Constraints (CRITICAL):
 - Hyperparameters: All tuning parameters (e.g., weights, constants) must be defined as local variables inside the function body. Do not add them as function arguments.
 - Signature: Define exactly one function: def {func_name}(state): ... that returns a finite float.
+- Sandbox: No import/from, classes, while loops, or reflection builtins (getattr, hasattr, eval, type, ...). Access state fields only via dot notation (state.robot.px, state.dmin, state.humans, ...).
 - Output Format: Your response must contain only the Python function within a single code block. Do not include any explanatory text or print statements.
 {seed_block}
 {reflection_block}
@@ -54,6 +55,25 @@ Constraints (CRITICAL):
 # D.2 Evolutionary Operations
 # ---------------------------------------------------------------------------
 
+_REWARD_STATE_ACCESS = """\
+RewardState access (dot notation only — never getattr/hasattr):
+- state.robot.px, state.robot.py, state.robot.vx, state.robot.vy, state.robot.radius, state.robot.gx, state.robot.gy, state.robot.v_pref
+- state.humans — loop with `for human in state.humans:` then human.px, human.py, human.vx, human.vy, human.radius
+- state.dmin, state.discomfort_dist, state.collision, state.reaching_goal, state.timeout
+- state.action, state.time_step, state.global_time, state.time_limit
+"""
+
+_D2_SANDBOX_RULES = """
+Sandbox rules (CRITICAL — invalid code is discarded):
+- Define exactly ONE top-level function `{func_name}(state)` returning a finite float.
+- Do NOT use import/from, classes, while loops, print, lambda, or reflection builtins.
+- Forbidden names (instant rejection): getattr, hasattr, eval, exec, type, setattr, delattr, globals, locals, vars, open.
+- Access RewardState only via dot notation (see below). If a parent uses getattr/hasattr or dynamic field lookup, rewrite those lines to explicit attribute access before returning code.
+{reward_state_access}
+- Use only local variables for hyperparameters; no extra function arguments.
+- Return ONLY one Python fenced code block with no text outside it.
+"""
+
 D2_CROSSOVER_PROMPT = """You are a reward function architect. Your task is to synthesize a new function by combining the complementary strengths of two parent functions. Below are two candidate reward functions and a textual reflection. Use them to synthesize an improved hybrid design that combines the strengths of both functions while addressing weaknesses noted in the reflection.
 Parent A:
 - {code_A}
@@ -63,7 +83,9 @@ Reflection:
 - {reflection}.
 Synthesis Task:
 - Based on the provided reflection, write a new, improved function `{func_name}` that merges the superior safety features from Parent A with the efficiency-promoting logic from Parent B.
+- When copying logic from parents, strip any getattr/hasattr/dynamic-access patterns and use direct `state.*` / `human.*` attribute access instead.
 - Define exactly one function: def {func_name}(state): ... returning a finite float.
+{sandbox_rules}
 - Return only a single Python fenced code block.
 """
 
@@ -75,7 +97,9 @@ High-Performing Code to Mutate:
 - {elitist_code}
 Mutation Task:
 - Based on the reflection, create a mutated function `{func_name}`. Make a minimal, precise change to the code to address the identified weakness without degrading its existing strengths.
+- Keep direct dot access to RewardState fields; do not introduce getattr, hasattr, or other forbidden reflection builtins.
 - Define exactly one function: def {func_name}(state): ... returning a finite float.
+{sandbox_rules}
 - Return only a single Python fenced code block.
 """
 
@@ -196,6 +220,69 @@ def format_d1_initial(
     )
 
 
+D1_BATCH_USER_PROMPT = """Please write **{n} diverse** Python reward functions for a robot navigation task in a crowded environment.
+Task Description:
+- Each function's goal is to output a scalar reward value based on the robot's current state, guiding it to its goal while avoiding collisions with dynamic human agents.
+Function Interface (same for every function):
+- Inputs:
+  - state: A RewardState snapshot for the current frame with fields:
+    - state.robot: px, py, vx, vy, radius, gx, gy, v_pref
+    - state.humans: tuple of nearby humans (px, py, vx, vy, radius) within sensor range
+    - state.dmin: closest human distance minus radii
+    - state.discomfort_dist, state.collision, state.reaching_goal, state.timeout
+    - state.action, state.time_step, state.global_time, state.time_limit
+- Output:
+  - A single scalar (float) representing the reward for the current state or action.
+Design Principles:
+- Goal-Progress: reward progress toward the robot goal.
+- Collision Avoidance: penalize unsafe proximity and collisions.
+- Diversity: the {n} functions must differ in structure and hyperparameters (not trivial renames).
+Constraints (CRITICAL):
+- Hyperparameters must be local variables inside each function body (no extra arguments).
+- Define exactly {n} top-level functions. Name them ``{func_name}_v1``, ``{func_name}_v2``, ... ``{func_name}_v{n}`` (each returns a finite float).
+- Do **not** use import statements, classes, while loops, or reflection builtins (getattr, hasattr, eval, type, ...).
+- Access RewardState only via dot notation (state.robot.px, state.dmin, state.humans, ...).
+- Output Format: return **only** Python code in a single fenced code block. No prose outside the block.
+{seed_block}
+{reflection_block}
+{external_knowledge_block}
+"""
+
+
+def format_d1_initial_batch(
+    n: int,
+    *,
+    func_name: str = "compute_reward",
+    include_seed: bool = True,
+    include_external_knowledge: bool = True,
+    reflection: str = "",
+) -> str:
+    """Appendix D.1 batch variant: one LLM call proposes ``n`` diverse functions."""
+    if n < 1:
+        raise ValueError("batch size n must be >= 1")
+    seed_block = ""
+    if include_seed:
+        seed_block = (
+            "Seed function (perturb / diversify; do not copy verbatim unless useful):\n"
+            "```python\n"
+            f"{D5_SEED_FUNCTION.rstrip()}\n"
+            "```\n"
+        )
+    reflection_block = ""
+    if reflection.strip():
+        reflection_block = f"Reflective guidance from prior generations:\n{reflection.strip()}\n"
+    external_block = ""
+    if include_external_knowledge:
+        external_block = f"External knowledge:\n{D4_EXTERNAL_KNOWLEDGE}\n"
+    return D1_BATCH_USER_PROMPT.format(
+        n=int(n),
+        func_name=func_name,
+        seed_block=seed_block,
+        reflection_block=reflection_block,
+        external_knowledge_block=external_block,
+    )
+
+
 def format_d2_crossover(
     code_a: str,
     code_b: str,
@@ -208,6 +295,10 @@ def format_d2_crossover(
         code_B=code_b.rstrip(),
         reflection=reflection.strip() or "(none)",
         func_name=func_name,
+        sandbox_rules=_D2_SANDBOX_RULES.format(
+            func_name=func_name,
+            reward_state_access=_REWARD_STATE_ACCESS,
+        ),
     )
 
 
@@ -223,6 +314,10 @@ def format_d2_mutation(
         func_signature=func_signature,
         elitist_code=elitist_code.rstrip(),
         func_name=func_name,
+        sandbox_rules=_D2_SANDBOX_RULES.format(
+            func_name=func_name,
+            reward_state_access=_REWARD_STATE_ACCESS,
+        ),
     )
 
 

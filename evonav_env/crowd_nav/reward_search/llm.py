@@ -17,19 +17,22 @@ import time
 from abc import ABC, abstractmethod
 from typing import List, Optional, Sequence
 
-
 class LLMClient(ABC):
     """Minimal text-completion interface (sister-project compatible)."""
 
     @abstractmethod
-    def complete(self, prompt: str) -> str:
+    def complete(self, prompt: str, *, max_tokens: Optional[int] = None) -> str:
         raise NotImplementedError
 
-    def generate(self, prompt: str, n: int = 1) -> List[str]:
+    def generate(self, prompt: str, n: int = 1, *, max_tokens: Optional[int] = None) -> List[str]:
         """Return ``n`` raw completion strings for the same prompt."""
         if n <= 0:
             raise ValueError("n must be positive")
-        return [self.complete(prompt) for _ in range(n)]
+        return [self.complete(prompt, max_tokens=max_tokens) for _ in range(n)]
+
+
+class CompletionTruncatedError(RuntimeError):
+    """Raised when a fenced completion strongly appears truncated."""
 
 
 class ScriptedLLMClient(LLMClient):
@@ -41,7 +44,7 @@ class ScriptedLLMClient(LLMClient):
         self._completions = tuple(completions)
         self._index = 0
 
-    def complete(self, prompt: str) -> str:
+    def complete(self, prompt: str, *, max_tokens: Optional[int] = None) -> str:
         if self._index >= len(self._completions):
             raise IndexError(
                 f"ScriptedLLMClient has no remaining completions "
@@ -106,16 +109,20 @@ class GroqLLMClient(LLMClient):
                 resolve_single_groq_api_key,
             )
 
-            env_key = resolve_single_groq_api_key()
-            if env_key:
-                self.api_key = env_key
-            elif use_key_pool and groq_key_pool_available():
+            # Prefer multi-key pool (rotation + pacing) when groq_keys.json exists.
+            if use_key_pool and groq_key_pool_available():
                 from crowd_nav.reward_search.key_manager import get_key_manager
 
                 self._key_manager = get_key_manager()
                 self.api_key = None
             else:
-                self.api_key = None
+                env_key = resolve_single_groq_api_key()
+                self.api_key = env_key
+                if not self.api_key:
+                    raise RuntimeError(
+                        "GroqLLMClient requires GROQ_API_KEY, api_key=..., or "
+                        "evonav_env/groq_keys.json (see groq_keys.json.example)"
+                    )
 
     @staticmethod
     def _is_non_retryable(exc: Exception) -> bool:
@@ -127,7 +134,7 @@ class GroqLLMClient(LLMClient):
             return True
         return False
 
-    def complete(self, prompt: str) -> str:
+    def complete(self, prompt: str, *, max_tokens: Optional[int] = None) -> str:
         if not self.api_key and self._key_manager is None:
             raise RuntimeError(
                 "GroqLLMClient requires GROQ_API_KEY, api_key=..., or "
@@ -141,7 +148,7 @@ class GroqLLMClient(LLMClient):
             "model": self.model,
             "messages": messages,
             "temperature": self.temperature,
-            "max_tokens": self.max_tokens,
+            "max_tokens": int(max_tokens) if max_tokens is not None else self.max_tokens,
         }
 
         if self._key_manager is not None:
@@ -153,7 +160,7 @@ class GroqLLMClient(LLMClient):
                     "Install with: pip install groq"
                 ) from exc
             content = response.choices[0].message.content
-            if not content:
+            if not content or not str(content).strip():
                 raise RuntimeError("Groq returned an empty completion.")
             return str(content)
 
@@ -165,17 +172,35 @@ class GroqLLMClient(LLMClient):
                 "Install with: pip install groq"
             ) from exc
 
-        client = Groq(api_key=self.api_key)
+        from crowd_nav.reward_search.key_manager import (
+            _is_rate_limit_error,
+            get_groq_pacer,
+        )
+
+        pacer = get_groq_pacer()
+        # Disable SDK auto-retry; we pace/rotate keys explicitly to avoid 429 storms.
+        client = Groq(api_key=self.api_key, max_retries=0)
         last_error: Optional[Exception] = None
         for attempt in range(1, self.max_attempts + 1):
+            pacer.wait_turn()
             try:
                 response = client.chat.completions.create(**create_kwargs)
+                pacer.observe_response(response)
                 content = response.choices[0].message.content
-                if not content:
+                if not content or not str(content).strip():
                     raise RuntimeError("Groq returned an empty completion.")
                 return str(content)
             except Exception as exc:  # noqa: BLE001 — retry transient errors
                 last_error = exc
+                if _is_rate_limit_error(exc):
+                    retry_after = getattr(exc, "retry_after", None)
+                    if retry_after is not None:
+                        try:
+                            pacer._hold_until = max(
+                                pacer._hold_until, time.time() + float(retry_after)
+                            )
+                        except (TypeError, ValueError):
+                            pass
                 if self._is_non_retryable(exc):
                     raise RuntimeError(
                         f"Groq LLM non-retryable error for model={self.model!r}: {exc}"
@@ -225,11 +250,11 @@ class VLLMLLMClient(LLMClient):
         self.max_attempts = int(max_attempts)
         self.retry_delay_seconds = float(retry_delay_seconds)
 
-    def complete(self, prompt: str) -> str:
+    def complete(self, prompt: str, *, max_tokens: Optional[int] = None) -> str:
         last_error: Optional[Exception] = None
         for attempt in range(1, self.max_attempts + 1):
             try:
-                return self._complete_once(prompt)
+                return self._complete_once(prompt, max_tokens=max_tokens)
             except Exception as exc:  # noqa: BLE001
                 last_error = exc
                 if attempt >= self.max_attempts:
@@ -239,11 +264,12 @@ class VLLMLLMClient(LLMClient):
             f"vLLM LLM failed after {self.max_attempts} attempts. Last error: {last_error}"
         ) from last_error
 
-    def _complete_once(self, prompt: str) -> str:
+    def _complete_once(self, prompt: str, *, max_tokens: Optional[int] = None) -> str:
         messages = [
             {"role": "system", "content": self.system_prompt},
             {"role": "user", "content": prompt},
         ]
+        token_limit = int(max_tokens) if max_tokens is not None else self.max_tokens
         try:
             from openai import OpenAI
 
@@ -252,16 +278,16 @@ class VLLMLLMClient(LLMClient):
                 model=self.model,
                 messages=messages,
                 temperature=self.temperature,
-                max_tokens=self.max_tokens,
+                max_tokens=token_limit,
             )
             content = response.choices[0].message.content
-            if not content:
+            if not content or not str(content).strip():
                 raise RuntimeError("vLLM returned an empty completion.")
             return str(content)
         except ImportError:
-            return self._complete_urllib(messages)
+            return self._complete_urllib(messages, max_tokens=token_limit)
 
-    def _complete_urllib(self, messages: list) -> str:
+    def _complete_urllib(self, messages: list, *, max_tokens: int) -> str:
         import json
         import urllib.error
         import urllib.request
@@ -271,7 +297,7 @@ class VLLMLLMClient(LLMClient):
             "model": self.model,
             "messages": messages,
             "temperature": self.temperature,
-            "max_tokens": self.max_tokens,
+            "max_tokens": max_tokens,
         }
         data = json.dumps(payload).encode("utf-8")
         req = urllib.request.Request(
@@ -289,9 +315,29 @@ class VLLMLLMClient(LLMClient):
         except urllib.error.URLError as exc:
             raise RuntimeError(f"vLLM request failed: {exc}") from exc
         content = body["choices"][0]["message"]["content"]
-        if not content:
+        if not content or not str(content).strip():
             raise RuntimeError("vLLM returned an empty completion.")
         return str(content)
+
+
+class OllamaLLMClient(VLLMLLMClient):
+    """
+    Local Ollama server (OpenAI-compatible endpoint). No API key required.
+
+    The default qwen3.5:4b model is a reasoning model, so max_tokens leaves
+    generous headroom for thinking tokens before the code fence.
+    """
+
+    DEFAULT_MODEL = "qwen3.5:4b"
+    DEFAULT_BASE_URL = "http://localhost:11434/v1"
+
+    def __init__(self, **kwargs):
+        kwargs.setdefault("model", self.DEFAULT_MODEL)
+        if kwargs.get("base_url") is None:
+            kwargs["base_url"] = os.environ.get("OLLAMA_BASE_URL", self.DEFAULT_BASE_URL)
+        kwargs.setdefault("api_key", "ollama")
+        kwargs.setdefault("max_tokens", 4096)
+        super().__init__(**kwargs)
 
 
 class SeedVariantLLMClient(LLMClient):
@@ -308,7 +354,7 @@ class SeedVariantLLMClient(LLMClient):
         self._base = (base_code or D5_SEED_FUNCTION).strip()
         self._n = 0
 
-    def complete(self, prompt: str) -> str:
+    def complete(self, prompt: str, *, max_tokens: Optional[int] = None) -> str:
         self._n += 1
         pot = 2.0 + 0.05 * ((self._n % 20) - 10)
         # Tiny localized tweak so Stage I/II/III see distinct codes.
@@ -338,7 +384,7 @@ def make_llm_client(
     **kwargs,
 ) -> LLMClient:
     """
-    Factory: ``provider`` in {``scripted``, ``seed``, ``groq``, ``vllm``}.
+    Factory: ``provider`` in {``scripted``, ``seed``, ``groq``, ``vllm``, ``ollama``}.
 
     For ``scripted``, pass ``completions=...``.
     For ``seed``, returns ``SeedVariantLLMClient`` (no API key).
@@ -354,30 +400,87 @@ def make_llm_client(
         return GroqLLMClient(model=model or GroqLLMClient.DEFAULT_MODEL, **kwargs)
     if name in ("vllm", "local", "gpt-oss", "gpt-oss-120b"):
         return VLLMLLMClient(model=model or VLLMLLMClient.DEFAULT_MODEL, **kwargs)
+    if name == "ollama":
+        return OllamaLLMClient(model=model or OllamaLLMClient.DEFAULT_MODEL, **kwargs)
     raise ValueError(f"Unknown LLM provider: {provider!r}")
 
 
-def extract_python_code(completion: str) -> str:
-    """Pull the first fenced Python (or generic) code block from an LLM reply."""
-    text = completion.strip()
-    fence = "```python"
-    if fence in text:
-        start = text.index(fence) + len(fence)
-        rest = text[start:]
-        end = rest.find("```")
-        if end >= 0:
-            return rest[:end].strip()
-        return rest.strip()
-    if "```" in text:
-        start = text.index("```") + 3
-        rest = text[start:]
-        if rest.startswith("\n"):
-            rest = rest[1:]
-        end = rest.find("```")
-        if end >= 0:
-            return rest[:end].strip()
+_FENCE_BLOCK_RE = re.compile(r"```(?:python)?\s*\n(.*?)```", re.DOTALL | re.IGNORECASE)
+
+
+def extract_all_python_blocks(completion: str) -> List[str]:
+    """Return every fenced code block in an LLM reply (may be empty)."""
+    text = (completion or "").strip()
+    blocks = [m.group(1).strip() for m in _FENCE_BLOCK_RE.finditer(text) if m.group(1).strip()]
+    return blocks
+
+
+def extract_python_code(completion: str, *, max_tokens: Optional[int] = None) -> str:
+    """
+    Pull Python source from an LLM reply.
+
+    Prefers fenced blocks (```python ... ```); strips leading/trailing prose.
+    If multiple blocks exist, returns the first non-empty block.
+    """
+    text = (completion or "").strip()
+    opening = re.search(r"```python\b", text, re.IGNORECASE)
+    if (
+        max_tokens is not None
+        and len(text) >= 0.95 * int(max_tokens)
+        and opening is not None
+        and "```" not in text[opening.end() :]
+    ):
+        raise CompletionTruncatedError(
+            "no closing code fence found; completion may have been truncated mid-reasoning by max_tokens"
+        )
+    blocks = extract_all_python_blocks(text)
+    if blocks:
+        return blocks[0]
+    if text.startswith("```"):
+        # Unclosed fence — strip opening tag and return remainder.
+        rest = re.sub(r"^```(?:python)?\s*\n?", "", text, count=1, flags=re.IGNORECASE)
         return rest.strip()
     return text
+
+
+def split_reward_function_sources(
+    completion: str,
+    *,
+    func_name: str = "compute_reward",
+    max_tokens: Optional[int] = None,
+) -> List[str]:
+    """
+    Split a multi-candidate LLM reply into separate reward function sources.
+
+    Used for Appendix D.1 batch generation (one call, several ``def`` bodies).
+    """
+    import ast
+
+    blocks = extract_all_python_blocks(completion)
+    if not blocks:
+        blocks = [extract_python_code(completion, max_tokens=max_tokens)]
+    pieces: List[str] = []
+    for block in blocks:
+        block = block.strip()
+        if not block:
+            continue
+        try:
+            tree = ast.parse(block)
+        except SyntaxError:
+            pieces.append(normalize_to_compute_reward(block, func_name))
+            continue
+        func_nodes = [node for node in tree.body if isinstance(node, ast.FunctionDef)]
+        if not func_nodes:
+            pieces.append(normalize_to_compute_reward(block, func_name))
+            continue
+        if len(func_nodes) == 1:
+            pieces.append(normalize_to_compute_reward(block, func_name))
+            continue
+        for node in func_nodes:
+            segment = ast.get_source_segment(block, node)
+            if segment:
+                pieces.append(normalize_to_compute_reward(segment, func_name))
+    return pieces
 
 
 _DEF_RE = re.compile(
