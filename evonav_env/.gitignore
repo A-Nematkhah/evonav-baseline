@@ -7,6 +7,12 @@ venv/
 *.pyc
 __pycache__/
 .pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.log
+*.tmp
+build/
+dist/
 .DS_Store
 
 # Local run artifacts (regenerate via scripts/)
