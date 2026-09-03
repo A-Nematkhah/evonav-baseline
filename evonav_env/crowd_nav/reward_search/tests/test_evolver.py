@@ -123,6 +123,48 @@ def test_stage_i_builds_n8_and_runs_one_generation():
     assert "random" in origins
 
 
+def test_global_best_survives_a_regressive_generation():
+    batch = _valid_code(100.0)
+    initial = [
+        StageIEvolver(
+            ScriptedLLMClient([_valid_code(0.0)]),
+            score_fn=_score_by_smoke,
+            config=StageIConfig(generations=0),
+        )._make_candidate(_valid_code(float(index)), origin="initial")
+        for index in range(8)
+    ]
+    initial[0].score = 100.0
+    low = [
+        StageIEvolver(
+            ScriptedLLMClient([_valid_code(0.0)]),
+            score_fn=_score_by_smoke,
+            config=StageIConfig(generations=0),
+        )._make_candidate(_valid_code(1.0), origin="mutation")
+        for _ in range(8)
+    ]
+    for candidate in low:
+        candidate.score = 1.0
+
+    evolver = StageIEvolver(
+        ScriptedLLMClient([batch]),
+        score_fn=_score_by_smoke,
+        config=StageIConfig(generations=1),
+    )
+    evolver.initialize_population = lambda: initial
+    rankings = iter([initial, low])
+    evolver.score_population = lambda population: next(rankings)
+    evolver._next_generation = lambda ranked: low
+    final = evolver.run()
+
+    assert evolver.global_best is initial[0]
+    assert evolver.global_best not in final
+
+    from crowd_nav.reward_search.pipeline import EvoNavPipeline
+
+    handed_to_stage2 = EvoNavPipeline._include_global_best(final, evolver.global_best)
+    assert any(candidate.candidate_id == initial[0].candidate_id for candidate in handed_to_stage2)
+
+
 def test_gen0_replaces_invalid_with_extra_draws():
     # Batch call returns one invalid; regen draws replace until 8 valids.
     batch_invalid = _invalid_import_code()
@@ -176,7 +218,11 @@ def test_mutation_uses_lower_performer_and_crossover_uses_top2():
     gen1 = evolver.history[1].population
     assert sum(1 for c in gen1 if c.origin == "crossover") == 2
     assert sum(1 for c in gen1 if c.origin == "mutation") == 4
-    assert sum(1 for c in gen1 if c.origin == "random") == 2
+    assert sum(1 for c in gen1 if c.origin == "random") == 1
+    assert any(
+        candidate.candidate_id == evolver.history[0].population[0].candidate_id
+        for candidate in gen1
+    )
     for c in gen1:
         if c.origin == "crossover":
             assert len(c.parent_ids) == 2

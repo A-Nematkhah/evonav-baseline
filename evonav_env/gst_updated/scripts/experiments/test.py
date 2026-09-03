@@ -27,7 +27,9 @@ def main(args):
     with open(join(checkpoint_dir, 'args.pickle'), 'rb') as f:
         args_eval = pickle.load(f)
     model = st_model(args_eval, device=device).to(device)
-    model_checkpoint = torch.load(join(checkpoint_dir, model_filename), map_location=device)
+    model_checkpoint = torch.load(
+        join(checkpoint_dir, model_filename), map_location=device, weights_only=False
+    )
     model.load_state_dict(model_checkpoint['model_state_dict'])
     print('Loaded configuration: ', writername)
     test_loss_epoch, test_aoe, test_foe, test_aoe_std, test_foe_std, test_aoe_min, test_foe_min = inference(loader_test, model, args, mode='test', tau=0.03, device=device)

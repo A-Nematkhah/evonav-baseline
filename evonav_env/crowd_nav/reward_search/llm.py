@@ -279,13 +279,34 @@ class VLLMLLMClient(LLMClient):
                 messages=messages,
                 temperature=self.temperature,
                 max_tokens=token_limit,
+                **self._request_options(),
             )
-            content = response.choices[0].message.content
+            content = self._extract_message_text(response.choices[0].message)
             if not content or not str(content).strip():
                 raise RuntimeError("vLLM returned an empty completion.")
             return str(content)
         except ImportError:
             return self._complete_urllib(messages, max_tokens=token_limit)
+
+    def _request_options(self) -> dict:
+        """Return provider-specific OpenAI-compatible request options."""
+        return {}
+
+    @staticmethod
+    def _extract_message_text(message) -> str:
+        """Read normal and reasoning-model message shapes from SDK responses."""
+        if isinstance(message, dict):
+            content = message.get("content")
+            reasoning = message.get("reasoning")
+        else:
+            content = getattr(message, "content", None)
+            reasoning = getattr(message, "reasoning", None)
+        if isinstance(content, list):
+            content = "".join(
+                str(item.get("text", "")) if isinstance(item, dict) else str(item)
+                for item in content
+            )
+        return str(content or reasoning or "")
 
     def _complete_urllib(self, messages: list, *, max_tokens: int) -> str:
         import json
@@ -299,6 +320,7 @@ class VLLMLLMClient(LLMClient):
             "temperature": self.temperature,
             "max_tokens": max_tokens,
         }
+        payload.update(self._request_options())
         data = json.dumps(payload).encode("utf-8")
         req = urllib.request.Request(
             url,
@@ -314,7 +336,7 @@ class VLLMLLMClient(LLMClient):
                 body = json.loads(resp.read().decode("utf-8"))
         except urllib.error.URLError as exc:
             raise RuntimeError(f"vLLM request failed: {exc}") from exc
-        content = body["choices"][0]["message"]["content"]
+        content = self._extract_message_text(body["choices"][0]["message"])
         if not content or not str(content).strip():
             raise RuntimeError("vLLM returned an empty completion.")
         return str(content)
@@ -338,6 +360,10 @@ class OllamaLLMClient(VLLMLLMClient):
         kwargs.setdefault("api_key", "ollama")
         kwargs.setdefault("max_tokens", 4096)
         super().__init__(**kwargs)
+
+    def _request_options(self) -> dict:
+        # Qwen reasoning can consume the entire completion budget before code.
+        return {"reasoning_effort": "none"}
 
 
 class SeedVariantLLMClient(LLMClient):

@@ -58,3 +58,31 @@ def test_ollama_complete_extracts_code_after_thinking_preamble(monkeypatch):
     _mock_openai(monkeypatch, raw)
     completion = OllamaLLMClient(max_attempts=1).complete("prompt")
     assert extract_python_code(completion) == "def compute_reward(state):\n    return 1.0"
+
+
+def test_ollama_disables_reasoning_and_accepts_reasoning_field(monkeypatch):
+    captured = {}
+
+    class FakeCompletions:
+        def create(self, **kwargs):
+            captured.update(kwargs)
+            return types.SimpleNamespace(
+                choices=[
+                    types.SimpleNamespace(
+                        message=types.SimpleNamespace(
+                            content="",
+                            reasoning="```python\ndef compute_reward(state):\n    return 2.0\n```",
+                        )
+                    )
+                ]
+            )
+
+    class FakeOpenAI:
+        def __init__(self, **kwargs):
+            self.chat = types.SimpleNamespace(completions=FakeCompletions())
+
+    monkeypatch.setitem(sys.modules, "openai", types.SimpleNamespace(OpenAI=FakeOpenAI))
+    completion = OllamaLLMClient(max_attempts=1).complete("prompt")
+
+    assert captured["reasoning_effort"] == "none"
+    assert "def compute_reward" in completion

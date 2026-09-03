@@ -121,6 +121,7 @@ class StageIEvolver:
         self._counter = 0
         self.reflection: str = ""
         self.history: List[GenerationRecord] = []
+        self.global_best: Optional[RewardCandidate] = None
 
         n = self.config.population_size
         if self.config.n_crossover + self.config.n_mutation + self.config.n_random != n:
@@ -560,15 +561,27 @@ class StageIEvolver:
             raise ValueError("Need at least 2 ranked candidates to evolve.")
 
         top_a, top_b = ranked[0], ranked[1]
+        generated_crossover = cfg.n_crossover
+        generated_mutation = cfg.n_mutation
+        generated_random = cfg.n_random
+        if generated_random > 0:
+            generated_random -= 1
+        elif generated_mutation > 0:
+            generated_mutation -= 1
+        elif generated_crossover > 0:
+            generated_crossover -= 1
+        else:
+            raise ValueError("At least one next-generation bucket must be positive.")
         # Lower performers: bottom half (paper: mutate using their weakness).
         lower = list(ranked[len(ranked) // 2 :])
         if not lower:
             lower = list(ranked[-1:])
 
         next_pop: List[RewardCandidate] = []
+        next_pop.append(top_a)
 
         # Crossover from top-2.
-        for i in range(cfg.n_crossover):
+        for i in range(generated_crossover):
             def _cross(attempt_no: int, _i=i) -> RewardCandidate:
                 del _i
                 return self._try_crossover(
@@ -590,7 +603,7 @@ class StageIEvolver:
             )
 
         # Mutation on lower performers (cycle if fewer parents than slots).
-        for i in range(cfg.n_mutation):
+        for i in range(generated_mutation):
             parent = lower[i % len(lower)]
 
             def _mut(attempt_no: int, _p=parent) -> RewardCandidate:
@@ -613,8 +626,8 @@ class StageIEvolver:
             )
 
         # Occasional random restarts (D.1-style) — batched when n_random > 1.
-        if cfg.n_random > 0:
-            next_pop.extend(self._fill_random_batch(cfg.n_random))
+        if generated_random > 0:
+            next_pop.extend(self._fill_random_batch(generated_random))
 
         assert len(next_pop) == cfg.population_size
         return next_pop
@@ -652,6 +665,7 @@ class StageIEvolver:
         """
         population = self.initialize_population()
         ranked = self.score_population(population)
+        self.global_best = ranked[0]
         self.reflection = self._build_reflection(ranked)
         self.history.append(
             GenerationRecord(
@@ -665,8 +679,21 @@ class StageIEvolver:
         )
 
         for g in range(1, self.config.generations + 1):
+            previous_best = ranked[0]
             population = self._next_generation(ranked)
             ranked = self.score_population(population)
+            if ranked[0].score < previous_best.score:
+                logger.warning(
+                    "Stage I regression: generation=%d best score %.6f (%s) "
+                    "below previous %.6f (%s)",
+                    g,
+                    ranked[0].score,
+                    ranked[0].candidate_id,
+                    previous_best.score,
+                    previous_best.candidate_id,
+                )
+            if ranked[0].score > self.global_best.score:
+                self.global_best = ranked[0]
             self.reflection = self._build_reflection(ranked)
             self.history.append(
                 GenerationRecord(

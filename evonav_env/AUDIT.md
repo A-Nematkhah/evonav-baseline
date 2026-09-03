@@ -187,7 +187,8 @@ Other Phase-1 awareness items:
 | Unit tests `crowd_nav/reward_search/tests/test_reward_adapter.py` | **16 passed** |
 | `train.py --algo ppo --num-env-steps 3000 --num-processes 1 --seed 425 --no-cuda` | OK; checkpoints `trained_models/smoke_legacy/{00000,00099}.pt` |
 | `test.py` → `ORCA_no_rand` / `00000.pt` (500 eps) | **SR 0.78, NT 15.87, PL 18.53, ITR 26.04%, SD 0.36** — matches paper Table II ORCA (no rand) exactly |
-| Venv | `evonav_env/.venv` (PyTorch 1.12.1+cpu, gym 0.15.7, Python-RVO2 built with VS2022 + Win SDK) |
+| GPU torch verification | System Python 3.10.11, `torch 2.11.0+cu128`, `torch.cuda.is_available() == True`; NVIDIA driver 610.62, CUDA UMD 13.3, RTX 3050 4GB |
+| Project environment | `.venv` was removed on 2026-09-03 at the user's request; recreate it from `requirements_pinned.txt` before a full isolated run |
 
 Do not mix this venv with the main Evonav project dependencies.
 

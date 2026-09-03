@@ -6,7 +6,7 @@ Single entry point for EvoNav Algorithm 1 (faithful replication baseline).
 
 No AMFRS mechanisms (novelty archive, Pareto ranking, adaptive controller).
 
-Examples (from ``evonav_env/`` with the project venv)::
+Examples (from ``evonav_env/`` with system Python)::
 
     # Seconds-scale dry run (stub trainers + seed LLM)
     python scripts/run_evonav.py --fast --output-dir results/evonav_fast
@@ -29,6 +29,9 @@ import sys
 _ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
+_BASELINES_ROOT = os.path.abspath(os.path.join(_ROOT, "..", "baselines_openai"))
+if _BASELINES_ROOT not in sys.path:
+    sys.path.insert(0, _BASELINES_ROOT)
 os.chdir(_ROOT)
 
 
@@ -71,7 +74,7 @@ def main() -> int:
             "(Tables 3–6, multi-seed); not used by pytest."
         ),
     )
-    parser.add_argument("--device", type=str, default="cpu", choices=["cpu", "cuda"])
+    parser.add_argument("--device", type=str, default="cuda", choices=["cpu", "cuda"])
     parser.add_argument(
         "--regime",
         type=str,

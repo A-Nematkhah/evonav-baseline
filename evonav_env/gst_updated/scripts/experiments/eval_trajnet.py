@@ -30,7 +30,9 @@ def main(args):
     with open(join(checkpoint_dir, 'args.pickle'), 'rb') as f:
         args_eval = pickle.load(f)
     model = st_model(args_eval, device=device).to(device)
-    model_checkpoint = torch.load(join(checkpoint_dir, model_filename), map_location=device)
+    model_checkpoint = torch.load(
+        join(checkpoint_dir, model_filename), map_location=device, weights_only=False
+    )
     model.load_state_dict(model_checkpoint['model_state_dict'])
     print('Loaded configuration: ', writername)
     print('The best validation losses printed below should be the same.')

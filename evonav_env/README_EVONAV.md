@@ -8,16 +8,18 @@ Upstream simulator docs: `README.md` in this directory. Architecture audit: `AUD
 
 ```bash
 cd evonav_env
-python -m venv .venv
-.venv\Scripts\activate          # Windows
-pip install -r requirements_pinned.txt
-pip install tensorflow
-pip install -e ../baselines_openai
-pip install groq                # only if using --llm groq
-# PyTorch 1.12.1 + Python-RVO2: see main README.md
+py -3.10 -m venv .venv
+.venv\Scripts\python.exe -m pip install -r requirements_pinned.txt
+.venv\Scripts\python.exe -m pip install git+https://github.com/sybrenstuvel/Python-RVO2.git
+.venv\Scripts\python.exe -m pip install -e ../baselines_openai
 ```
 
-Use **only** this `.venv` — do not merge with `mobile_robot_env`.
+Use this single `.venv` for the project. Do not mix it with system Python or
+another environment, and do not use a `PYTHONPATH` workaround.
+
+The pinned GPU wheel is `torch==2.11.0+cu128`. Adjust the `cu1xx` suffix and
+the official PyTorch index URL in `requirements_pinned.txt` to match the local
+CUDA driver before installing on another machine.
 
 ## Ollama (local, no API key)
 

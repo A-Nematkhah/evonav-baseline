@@ -70,7 +70,7 @@ class EvoNavRunConfig:
     stage3_use_stub: bool = False
     stage3_run_h_sweep: bool = True
 
-    device: str = "cpu"
+    device: str = "cuda"
     # AUDIT.md §8.1 — first validation pass defaults to without_random.
     randomization_regime: str = "without_random"
     # AUDIT.md §8.2 choice (a): Stage II/III use GST-inferred obs.
@@ -158,6 +158,20 @@ class EvoNavPipeline:
         )
         return make_score1_fn(dataset)
 
+    @staticmethod
+    def _include_global_best(
+        population: List[RewardCandidate], global_best: RewardCandidate
+    ) -> List[RewardCandidate]:
+        """Keep the best Stage-I candidate in the population sent to Stage II."""
+        if any(candidate.candidate_id == global_best.candidate_id for candidate in population):
+            return population
+        worst_index = min(
+            range(len(population)),
+            key=lambda index: population[index].score if population[index].score is not None else float("-inf"),
+        )
+        population[worst_index] = global_best
+        return population
+
     def _best(self, population: List[RewardCandidate]) -> RewardCandidate:
         ranked = sorted(
             population,
@@ -232,32 +246,17 @@ class EvoNavPipeline:
 
         # ----- Stage I -----
         logger.info("=== Stage I (analytical evolution) ===")
-        if cfg.fast:
-            n = cfg.stage1_population
-            s1_cfg = StageIConfig(
-                population_size=n,
-                generations=cfg.stage1_generations,
-                n_crossover=1 if n >= 2 else 0,
-                n_mutation=1 if n >= 2 else n,
-                n_random=max(0, n - 2) if n >= 2 else 0,
-            )
-            # n=1 edge case
-            if n == 1:
-                s1_cfg.n_crossover = 0
-                s1_cfg.n_mutation = 0
-                s1_cfg.n_random = 1
-            elif s1_cfg.n_crossover + s1_cfg.n_mutation + s1_cfg.n_random != n:
-                s1_cfg.n_crossover = 1
-                s1_cfg.n_mutation = 1
-                s1_cfg.n_random = n - 2
-        else:
-            s1_cfg = StageIConfig(
-                population_size=cfg.stage1_population,
-                generations=cfg.stage1_generations,
-                n_crossover=2,
-                n_mutation=4,
-                n_random=2,
-            )
+        n = cfg.stage1_population
+        n_crossover = min(2, n)
+        n_mutation = min(4, max(0, n - n_crossover))
+        n_random = n - n_crossover - n_mutation
+        s1_cfg = StageIConfig(
+            population_size=n,
+            generations=cfg.stage1_generations,
+            n_crossover=n_crossover,
+            n_mutation=n_mutation,
+            n_random=n_random,
+        )
         evolver = StageIEvolver(
             llm,
             score_fn=self._score_fn(),
@@ -266,7 +265,10 @@ class EvoNavPipeline:
             rejection_log_path=os.path.join(cfg.output_dir, "stage1_rejections.jsonl"),
         )
         stage1_pop = evolver.run()
-        best_s1 = stage1_pop[0]
+        if evolver.global_best is None:
+            raise RuntimeError("Stage I did not produce a global best candidate.")
+        best_s1 = evolver.global_best
+        stage1_pop = self._include_global_best(stage1_pop, best_s1)
         write_json(
             os.path.join(cfg.output_dir, "stage1_population.json"),
             {

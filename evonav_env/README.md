@@ -22,12 +22,15 @@ We demonstrate that our method enables the robot to achieve good navigation perf
 </p>
 
 ## Setup
-1. In a conda environment or virtual environment with Python 3.x, install the required python package
+1. Create the single project environment and install the required packages
 ```
-pip install -r requirements.txt
+py -3.10 -m venv .venv
+.venv\Scripts\python.exe -m pip install -r requirements_pinned.txt
 ```
 
-2. Install Pytorch 1.12.1 following the instructions [here](https://pytorch.org/get-started/previous-versions/#v1121)
+2. Match the `torch` wheel's `cu1xx` suffix and official PyTorch index URL to
+  the installed NVIDIA driver. Do not use a second system-Python environment
+  or a `PYTHONPATH` workaround.
 
 3. Install [OpenAI Baselines](https://github.com/openai/baselines#installation) 
 ```
@@ -36,7 +39,10 @@ cd baselines
 pip install -e .
 ```
 
-4. Install [Python-RVO2](https://github.com/sybrenstuvel/Python-RVO2) library
+4. Install [Python-RVO2](https://github.com/sybrenstuvel/Python-RVO2) in the same environment
+```
+.venv\Scripts\python.exe -m pip install git+https://github.com/sybrenstuvel/Python-RVO2.git
+```
 
 
 ## Overview
