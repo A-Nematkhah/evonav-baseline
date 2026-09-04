@@ -30,14 +30,15 @@ extras['all'] = all_deps
 setup(name='baselines',
       packages=[package for package in find_packages()
                 if package.startswith('baselines')],
+      # Trimmed for the EvoNav fork: algorithm packages (ppo2, deepq, …) were
+      # removed; only logger / bench / common.vec_env (+ transitive) remain.
+      # opencv-python is optional (Atari wrappers only; CrowdSim never imports it).
       install_requires=[
           'gym>=0.15.4, <0.16.0',
           'scipy',
           'tqdm',
           'joblib',
           'cloudpickle',
-          'click',
-          'opencv-python'
       ],
       extras_require=extras,
       description='OpenAI baselines: high quality implementations of reinforcement learning algorithms',

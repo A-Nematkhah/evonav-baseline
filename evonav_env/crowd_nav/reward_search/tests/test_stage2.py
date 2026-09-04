@@ -23,7 +23,7 @@ from crowd_nav.reward_search.stage2 import (
 def _valid_code(value: float) -> str:
     return (
         "```python\n"
-        "def compute_reward(state):\n"
+        "def compute_reward(state, memory):\n"
         f"    return float({value})\n"
         "```\n"
     )
@@ -33,7 +33,7 @@ def _invalid_import_code() -> str:
     return (
         "```python\n"
         "import os\n"
-        "def compute_reward(state):\n"
+        "def compute_reward(state, memory):\n"
         "    return float(0.0)\n"
         "```\n"
     )
@@ -43,7 +43,7 @@ def _make_population(n: int = 2) -> list:
     validator = RewardValidator()
     pop = []
     for i in range(n):
-        code = f"def compute_reward(state):\n    return float({i}.0)\n"
+        code = f"def compute_reward(state, memory):\n    return float({i}.0)\n"
         reward_fn, err = validator.try_validate(code)
         assert reward_fn is not None, err
         pop.append(
@@ -151,3 +151,20 @@ def test_table5_defaults():
     assert cfg.eval_episodes == 50
     assert cfg.horizon_steps == 100
     assert cfg.algo == "a2c"
+    assert cfg.num_processes is None  # resolved at train time
+
+
+def test_stage2_argv_resolves_auto_num_processes():
+    from crowd_nav.reward_search.parallelism import resolve_num_processes
+    from crowd_nav.reward_search.stage2 import _stage2_train_argv
+
+    cfg = Stage2Config(num_processes=None)
+    argv = _stage2_train_argv(cfg, "c0", 0)
+    assert "--num-processes" in argv
+    n = int(argv[argv.index("--num-processes") + 1])
+    assert n == resolve_num_processes(None)
+    assert n >= 1
+
+    cfg1 = Stage2Config(num_processes=1)
+    argv1 = _stage2_train_argv(cfg1, "c0", 0)
+    assert int(argv1[argv1.index("--num-processes") + 1]) == 1

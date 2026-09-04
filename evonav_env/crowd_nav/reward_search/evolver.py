@@ -28,6 +28,7 @@ from crowd_nav.reward_search.llm import (
     normalize_to_compute_reward,
     split_reward_function_sources,
 )
+from crowd_nav.reward_search import console
 from crowd_nav.reward_search.prompts import (
     D1_SYSTEM_PROMPT,
     D5_SEED_FUNCTION,
@@ -178,12 +179,18 @@ class StageIEvolver:
         with open(self.rejection_log_path, "a", encoding="utf-8") as handle:
             handle.write(json.dumps(record, ensure_ascii=False) + "\n")
         if not accepted:
+            # One short WARNING line; raw preview only at DEBUG to avoid flood.
             logger.warning(
-                "Gen0 rejection attempt=%s category=%s error=%s raw=%r",
+                "[Stage I] sandbox reject phase=%s attempt=%s category=%s: %s",
+                phase,
                 attempt,
                 record["rejection_category"],
-                validation_error,
+                (validation_error or "")[:160],
+            )
+            logger.debug(
+                "Gen0 rejection raw_preview=%r extracted_preview=%r",
                 record["raw_preview"],
+                record["extracted_preview"],
             )
 
     def _llm_raw(self, user_prompt: str, *, max_tokens: Optional[int] = None) -> str:
@@ -327,17 +334,22 @@ class StageIEvolver:
         needed = cfg.population_size
         out: List[RewardCandidate] = []
         batch_id = f"gen0_batch_{self._counter:04d}"
-        batch_prompt = format_d1_initial_batch(
-            needed,
-            func_name=cfg.func_name,
-            include_seed=True,
-            include_external_knowledge=cfg.include_external_knowledge,
-            reflection=self.reflection,
+        console.status(
+            f"Gen 0/{cfg.generations} - generating initial population (N={needed})",
+            stage="Stage I",
         )
-        raw_batch = self._llm_raw(
-            batch_prompt,
-            max_tokens=self._batch_max_tokens(needed),
-        )
+        with console.timed("Gen0 LLM batch", stage="Stage I"):
+            batch_prompt = format_d1_initial_batch(
+                needed,
+                func_name=cfg.func_name,
+                include_seed=True,
+                include_external_knowledge=cfg.include_external_knowledge,
+                reflection=self.reflection,
+            )
+            raw_batch = self._llm_raw(
+                batch_prompt,
+                max_tokens=self._batch_max_tokens(needed),
+            )
         try:
             codes = split_reward_function_sources(
                 raw_batch,
@@ -345,6 +357,7 @@ class StageIEvolver:
                 max_tokens=self._batch_max_tokens(needed),
             )
         except Exception as exc:
+            console.fail(f"Gen0 batch parse failed: {exc}", stage="Stage I")
             self._log_rejection(
                 phase="gen0_batch",
                 attempt=1,
@@ -355,10 +368,9 @@ class StageIEvolver:
                 batch_id=batch_id,
             )
             codes = []
-        logger.info(
-            "Gen0 batch call produced %d function source(s) (target %d)",
-            len(codes),
-            needed,
+        console.status(
+            f"Gen0 batch produced {len(codes)}/{needed} function source(s)",
+            stage="Stage I",
         )
         attempt = 0
         for code in codes:
@@ -375,10 +387,19 @@ class StageIEvolver:
             )
             if cand.valid:
                 out.append(cand)
+                console.status(
+                    f"accepted {cand.candidate_id} ({len(out)}/{needed})",
+                    stage="Stage I",
+                )
 
         remaining = needed - len(out)
         if remaining <= 0:
             return out
+
+        console.status(
+            f"regenerating {remaining} invalid Gen0 slot(s)",
+            stage="Stage I",
+        )
 
         def _one(attempt_no: int) -> RewardCandidate:
             prompt = format_d1_initial(
@@ -412,18 +433,30 @@ class StageIEvolver:
 
     def score_population(self, population: Sequence[RewardCandidate]) -> List[RewardCandidate]:
         scored: List[RewardCandidate] = []
-        for cand in population:
+        n = len(population)
+        for i, cand in enumerate(population, start=1):
+            console.status(
+                f"scoring candidate {cand.candidate_id} ({i}/{n})",
+                stage="Stage I",
+            )
             if not cand.is_executable:
                 scored.append(
                     replace(cand, score=float("-inf"), metadata={**cand.metadata, "unscored": True})
                 )
                 continue
-            value = float(
-                self.score_fn(
-                    cand.as_reward_function(),
-                    candidate_id=cand.candidate_id,
+            try:
+                value = float(
+                    self.score_fn(
+                        cand.as_reward_function(),
+                        candidate_id=cand.candidate_id,
+                    )
                 )
-            )
+            except Exception as exc:  # noqa: BLE001
+                console.fail(
+                    f"Score1 crashed for {cand.candidate_id}: {exc}",
+                    stage="Stage I",
+                )
+                raise
             scored.append(replace(cand, score=value))
         scored.sort(
             key=lambda c: float("-inf") if c.score is None else float(c.score),
@@ -663,7 +696,9 @@ class StageIEvolver:
 
         Returns the final ranked population (best first).
         """
-        population = self.initialize_population()
+        console.banner("Stage I - analytical Score1 evolution")
+        with console.timed("initialize Gen0 population", stage="Stage I"):
+            population = self.initialize_population()
         ranked = self.score_population(population)
         self.global_best = ranked[0]
         self.reflection = self._build_reflection(ranked)
@@ -677,20 +712,28 @@ class StageIEvolver:
                 best_id=ranked[0].candidate_id,
             )
         )
+        console.stage1_gen_summary(
+            0, self.config.generations, ranked, global_best=self.global_best
+        )
 
         for g in range(1, self.config.generations + 1):
             previous_best = ranked[0]
-            population = self._next_generation(ranked)
-            ranked = self.score_population(population)
+            console.status(
+                f"Gen {g}/{self.config.generations} - evolving next population "
+                f"(crossover={self.config.n_crossover}, "
+                f"mutation={self.config.n_mutation}, "
+                f"random={self.config.n_random})",
+                stage="Stage I",
+            )
+            with console.timed(f"Gen {g} evolve+score", stage="Stage I"):
+                population = self._next_generation(ranked)
+                ranked = self.score_population(population)
             if ranked[0].score < previous_best.score:
-                logger.warning(
-                    "Stage I regression: generation=%d best score %.6f (%s) "
-                    "below previous %.6f (%s)",
-                    g,
-                    ranked[0].score,
-                    ranked[0].candidate_id,
-                    previous_best.score,
-                    previous_best.candidate_id,
+                console.warn(
+                    f"regression: gen={g} best {ranked[0].candidate_id} "
+                    f"score={ranked[0].score:.6f} below previous "
+                    f"{previous_best.candidate_id} score={previous_best.score:.6f}",
+                    stage="Stage I",
                 )
             if ranked[0].score > self.global_best.score:
                 self.global_best = ranked[0]
@@ -704,6 +747,9 @@ class StageIEvolver:
                     best_score=ranked[0].score,
                     best_id=ranked[0].candidate_id,
                 )
+            )
+            console.stage1_gen_summary(
+                g, self.config.generations, ranked, global_best=self.global_best
             )
 
         return ranked

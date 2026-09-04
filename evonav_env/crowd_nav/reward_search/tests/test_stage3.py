@@ -25,7 +25,7 @@ from crowd_nav.reward_search.stage3 import (
 def _valid_code(value: float) -> str:
     return (
         "```python\n"
-        "def compute_reward(state):\n"
+        "def compute_reward(state, memory):\n"
         f"    return float({value})\n"
         "```\n"
     )
@@ -35,7 +35,7 @@ def _invalid_import_code() -> str:
     return (
         "```python\n"
         "import os\n"
-        "def compute_reward(state):\n"
+        "def compute_reward(state, memory):\n"
         "    return float(0.0)\n"
         "```\n"
     )
@@ -45,7 +45,7 @@ def _make_population(n: int = 2) -> list:
     validator = RewardValidator()
     pop = []
     for i in range(n):
-        code = f"def compute_reward(state):\n    return float({i}.0)\n"
+        code = f"def compute_reward(state, memory):\n    return float({i}.0)\n"
         reward_fn, err = validator.try_validate(code)
         assert reward_fn is not None, err
         pop.append(
@@ -70,6 +70,33 @@ def test_table6_defaults_and_k3_constant():
     assert STAGE3_STEPS < STAGE3_PAPER_STEPS
     assert STAGE3_PAPER_STEPS == int(1e7)
     assert cfg.human_counts == STAGE3_HUMAN_COUNTS == (5, 10, 15, 20)
+    assert cfg.num_processes is None  # resolved at train time
+
+
+def test_stage3_argv_k3_independent_of_num_processes():
+    """Total env-step budget K3 is unchanged; only wall-clock should change."""
+    from crowd_nav.reward_search.stage3 import _stage3_train_argv
+
+    cfg_a = Stage3Config(num_processes=1, train_env_steps=100_000)
+    cfg_b = Stage3Config(num_processes=4, train_env_steps=100_000)
+    argv_a = _stage3_train_argv(cfg_a, "c0", 0)
+    argv_b = _stage3_train_argv(cfg_b, "c0", 0)
+    assert argv_a[argv_a.index("--num-env-steps") + 1] == "100000"
+    assert argv_b[argv_b.index("--num-env-steps") + 1] == "100000"
+    assert int(argv_a[argv_a.index("--num-processes") + 1]) == 1
+    assert int(argv_b[argv_b.index("--num-processes") + 1]) == 4
+    # Same K3 string; update count floors but sample budget stays K3.
+    steps = 100_000
+    n_steps = cfg_a.num_steps
+    updates_a = steps // n_steps // 1
+    updates_b = steps // n_steps // 4
+    assert updates_a > updates_b
+    collected_a = updates_a * n_steps * 1
+    collected_b = updates_b * n_steps * 4
+    # Integer division can drop < one full update of env steps.
+    assert abs(collected_a - collected_b) < n_steps * 4
+    assert collected_a <= steps and collected_b <= steps
+
 
 
 def test_stage3_run_refines_to_v3_and_h_sweep():

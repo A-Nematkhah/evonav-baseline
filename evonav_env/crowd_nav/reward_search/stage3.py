@@ -18,6 +18,7 @@ import logging
 import os
 import re
 import sys
+import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, replace
 from typing import Any, Dict, List, Optional, Sequence, Tuple
@@ -26,10 +27,15 @@ import torch
 import torch.nn as nn
 
 from crowd_nav.reward_search.evolver import RewardCandidate
+from crowd_nav.reward_search import console
 from crowd_nav.reward_search.llm import (
     LLMClient,
     extract_python_code,
     normalize_to_compute_reward,
+)
+from crowd_nav.reward_search.parallelism import (
+    default_num_mini_batch,
+    resolve_num_processes,
 )
 from crowd_nav.reward_search.prompts import D3_SYSTEM_PROMPT, format_d3_refinement
 from crowd_nav.reward_search.sandbox import RewardValidator
@@ -68,9 +74,11 @@ class Stage3Config:
     # Full episodes: None → use env time_limit / time_step as step cap.
     horizon_steps: Optional[int] = None
     algo: str = "ppo"
-    num_processes: int = 1
+    # None → resolve_num_processes() at train time (min(16, cpu_count-1)).
+    num_processes: Optional[int] = None
     num_steps: int = 30  # PPO rollout length (matches seq_length)
-    num_mini_batch: int = 1  # must be <= num_processes (PPO storage assert)
+    # None → default_num_mini_batch(resolved num_processes).
+    num_mini_batch: Optional[int] = None
     ppo_epoch: int = 5
     seed: int = 425
     # Choice (a): GST-inferred obs parity with CrowdNav++ (AUDIT.md §8.2).
@@ -223,6 +231,14 @@ def _stage3_train_argv(
     out_dir = os.path.join(
         config.output_root, f"r{round_index:02d}_{candidate_id}"
     )
+    nproc = resolve_num_processes(config.num_processes)
+    nbatch = (
+        max(1, int(config.num_mini_batch))
+        if config.num_mini_batch is not None
+        else default_num_mini_batch(nproc)
+    )
+    if nbatch > nproc:
+        nbatch = nproc
     argv = [
         "stage3_train",
         "--algo",
@@ -230,13 +246,13 @@ def _stage3_train_argv(
         "--num-env-steps",
         str(int(config.train_env_steps)),
         "--num-processes",
-        str(config.num_processes),
+        str(nproc),
         "--num-steps",
         str(config.num_steps),
         "--seq_length",
         str(config.num_steps),
         "--num-mini-batch",
-        str(config.num_mini_batch),
+        str(nbatch),
         "--ppo-epoch",
         str(config.ppo_epoch),
         "--seed",
@@ -390,54 +406,81 @@ class RealPolicyTrainer(PolicyTrainer):
             // algo_args.num_steps
             // algo_args.num_processes
         )
-        for _j in range(num_updates):
-            for step in range(algo_args.num_steps):
+        console.status(
+            f"training {candidate.candidate_id} round={round_index} "
+            f"PPO K3={config.train_env_steps} updates={num_updates} "
+            f"nproc={algo_args.num_processes}",
+            stage="Stage III",
+        )
+        pbar = console.progress(
+            total=max(1, num_updates),
+            desc=f"[Stage III] {candidate.candidate_id} PPO",
+            unit="upd",
+        )
+        t_train = time.perf_counter()
+        try:
+            for _j in range(num_updates):
+                for step in range(algo_args.num_steps):
+                    with torch.no_grad():
+                        rollouts_obs = {k: rollouts.obs[k][step] for k in rollouts.obs}
+                        rollouts_hidden_s = {
+                            k: rollouts.recurrent_hidden_states[k][step]
+                            for k in rollouts.recurrent_hidden_states
+                        }
+                        value, action, action_log_prob, recurrent_hidden_states = (
+                            actor_critic.act(
+                                rollouts_obs, rollouts_hidden_s, rollouts.masks[step]
+                            )
+                        )
+                    obs, reward, done, infos = envs.step(action)
+                    masks = torch.FloatTensor([[0.0] if d else [1.0] for d in done])
+                    bad_masks = torch.FloatTensor(
+                        [[0.0] if "bad_transition" in info else [1.0] for info in infos]
+                    )
+                    rollouts.insert(
+                        obs,
+                        recurrent_hidden_states,
+                        action,
+                        action_log_prob,
+                        value,
+                        reward,
+                        masks,
+                        bad_masks,
+                    )
+
                 with torch.no_grad():
-                    rollouts_obs = {k: rollouts.obs[k][step] for k in rollouts.obs}
+                    rollouts_obs = {k: rollouts.obs[k][-1] for k in rollouts.obs}
                     rollouts_hidden_s = {
-                        k: rollouts.recurrent_hidden_states[k][step]
+                        k: rollouts.recurrent_hidden_states[k][-1]
                         for k in rollouts.recurrent_hidden_states
                     }
-                    value, action, action_log_prob, recurrent_hidden_states = (
-                        actor_critic.act(
-                            rollouts_obs, rollouts_hidden_s, rollouts.masks[step]
-                        )
-                    )
-                obs, reward, done, infos = envs.step(action)
-                masks = torch.FloatTensor([[0.0] if d else [1.0] for d in done])
-                bad_masks = torch.FloatTensor(
-                    [[0.0] if "bad_transition" in info else [1.0] for info in infos]
-                )
-                rollouts.insert(
-                    obs,
-                    recurrent_hidden_states,
-                    action,
-                    action_log_prob,
-                    value,
-                    reward,
-                    masks,
-                    bad_masks,
-                )
+                    next_value = actor_critic.get_value(
+                        rollouts_obs, rollouts_hidden_s, rollouts.masks[-1]
+                    ).detach()
 
-            with torch.no_grad():
-                rollouts_obs = {k: rollouts.obs[k][-1] for k in rollouts.obs}
-                rollouts_hidden_s = {
-                    k: rollouts.recurrent_hidden_states[k][-1]
-                    for k in rollouts.recurrent_hidden_states
-                }
-                next_value = actor_critic.get_value(
-                    rollouts_obs, rollouts_hidden_s, rollouts.masks[-1]
-                ).detach()
-
-            rollouts.compute_returns(
-                next_value,
-                algo_args.use_gae,
-                algo_args.gamma,
-                algo_args.gae_lambda,
-                algo_args.use_proper_time_limits,
+                rollouts.compute_returns(
+                    next_value,
+                    algo_args.use_gae,
+                    algo_args.gamma,
+                    algo_args.gae_lambda,
+                    algo_args.use_proper_time_limits,
+                )
+                agent.update(rollouts)
+                rollouts.after_update()
+                pbar.update(1)
+        except Exception as exc:  # noqa: BLE001
+            console.fail(
+                f"train crashed for {candidate.candidate_id} round={round_index}: {exc}",
+                stage="Stage III",
             )
-            agent.update(rollouts)
-            rollouts.after_update()
+            raise
+        finally:
+            pbar.close()
+        console.status(
+            f"train done for {candidate.candidate_id} in "
+            f"{console.format_seconds(time.perf_counter() - t_train)}; evaluating...",
+            stage="Stage III",
+        )
 
         ckpt_path = os.path.join(ckpt_dir, f"{max(num_updates - 1, 0):05d}.pt")
         torch.save(actor_critic.state_dict(), ckpt_path)
@@ -457,6 +500,10 @@ class RealPolicyTrainer(PolicyTrainer):
             f.write(metrics.feedback_text() + "\n")
             f.write(f"checkpoint={ckpt_path}\n")
             f.write(f"K3={config.train_env_steps} (paper={STAGE3_PAPER_STEPS})\n")
+        console.status(
+            f"eval {candidate.candidate_id}: {metrics.feedback_text()}",
+            stage="Stage III",
+        )
 
         return TrainEvalBundle(
             metrics=metrics,
@@ -485,11 +532,9 @@ class RealPolicyTrainer(PolicyTrainer):
         horizon = _resolve_horizon(config, env_config)
         by_h: Dict[int, ProxyMetrics] = {}
         for h in counts:
-            logger.info(
-                "H-sweep candidate=%s H=%d E=%d",
-                candidate.candidate_id,
-                h,
-                config.eval_episodes,
+            console.status(
+                f"H-sweep {candidate.candidate_id} H={h} E={config.eval_episodes}",
+                stage="Stage III",
             )
             by_h[int(h)] = evaluate_proxy_policy(
                 bundle.actor_critic,
@@ -629,24 +674,34 @@ class Stage3Runner:
                 len(population),
             )
         next_pop: List[RewardCandidate] = []
-        for cand in population:
+        round_records: List[Stage3RoundRecord] = []
+        n = len(population)
+        for i, cand in enumerate(population, start=1):
+            console.status(
+                f"Round {round_index + 1}/{self.config.rounds} - "
+                f"candidate {cand.candidate_id} ({i}/{n})",
+                stage="Stage III",
+            )
             refined, bundle, kept = self._train_refine_one(
                 cand, round_index=round_index
             )
-            self.history.append(
-                Stage3RoundRecord(
-                    round_index=round_index,
-                    candidate_id=cand.candidate_id,
-                    metrics=bundle.metrics,
-                    refined=not kept,
-                    kept_previous=kept,
-                    validation_error=refined.metadata.get("refine_error"),
-                    checkpoint_path=bundle.checkpoint_path,
-                )
+            rec = Stage3RoundRecord(
+                round_index=round_index,
+                candidate_id=cand.candidate_id,
+                metrics=bundle.metrics,
+                refined=not kept,
+                kept_previous=kept,
+                validation_error=refined.metadata.get("refine_error"),
+                checkpoint_path=bundle.checkpoint_path,
             )
+            self.history.append(rec)
+            round_records.append(rec)
             self.last_bundles[cand.candidate_id] = bundle
             self.last_bundles[refined.candidate_id] = bundle
             next_pop.append(refined)
+        console.stage_round_summary(
+            "Stage III", round_index, self.config.rounds, round_records
+        )
         return next_pop
 
     def _train_refine_one(self, cand: RewardCandidate, *, round_index: int):
@@ -766,16 +821,19 @@ class Stage3Runner:
         *,
         run_h_sweep: bool = True,
     ) -> List[RewardCandidate]:
+        console.banner(
+            f"Stage III - full PPO refinement (K3={self.config.train_env_steps}, "
+            f"paper={STAGE3_PAPER_STEPS})"
+        )
         pop = list(population)
         for r in range(self.config.rounds):
-            logger.info(
-                "Stage III round %d/%d (K3=%d, paper=%d)",
-                r + 1,
-                self.config.rounds,
-                self.config.train_env_steps,
-                STAGE3_PAPER_STEPS,
+            console.status(
+                f"starting round {r + 1}/{self.config.rounds} "
+                f"(N={len(pop)}, K3={self.config.train_env_steps})",
+                stage="Stage III",
             )
             pop = self.run_round(pop, round_index=r)
         if run_h_sweep:
+            console.status("running H-sweep generalization...", stage="Stage III")
             self.run_generalization_sweep(pop)
         return pop

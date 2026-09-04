@@ -386,7 +386,7 @@ class SeedVariantLLMClient(LLMClient):
         # Tiny localized tweak so Stage I/II/III see distinct codes.
         code = (
             "```python\n"
-            "def compute_reward(state):\n"
+            "def compute_reward(state, memory):\n"
             "    success_reward = 10.0\n"
             "    collision_penalty = -20.0\n"
             f"    pot_factor = {pot:.4f}\n"
@@ -396,7 +396,13 @@ class SeedVariantLLMClient(LLMClient):
             "        return float(collision_penalty)\n"
             "    dist = ((state.robot.px - state.robot.gx) ** 2 + "
             "(state.robot.py - state.robot.gy) ** 2) ** 0.5\n"
-            "    return float(pot_factor * (-dist))\n"
+            "    prev = memory.get('prev_dist')\n"
+            "    if prev is None:\n"
+            "        memory['prev_dist'] = dist\n"
+            "        return float(0.0)\n"
+            "    progress = float(prev) - dist\n"
+            "    memory['prev_dist'] = dist\n"
+            "    return float(pot_factor * progress)\n"
             "```\n"
         )
         return code
@@ -517,22 +523,40 @@ _DEF_RE = re.compile(
 
 def normalize_to_compute_reward(code: str, target_name: str = "compute_reward") -> str:
     """
-    Ensure the top-level function is named ``compute_reward`` for the sandbox.
+    Ensure the top-level function is named ``compute_reward(state, memory)``.
 
-    Renames common paper aliases (cal_reward, *_v2, seed_reward_func) only.
+    Renames common paper aliases (cal_reward, *_v2, seed_reward_func) and
+    upgrades a single-arg ``(state)`` signature to ``(state, memory)`` so
+    older completions still validate under the episode-memory contract.
     """
     text = code.strip()
     match = re.search(r"^def\s+(\w+)\s*\(", text, re.MULTILINE)
     if not match:
         return text
     name = match.group(1)
-    if name == target_name:
-        return text
-    # Rename first def only.
-    return re.sub(
-        rf"^def\s+{re.escape(name)}\s*\(",
-        f"def {target_name}(",
+    if name != target_name:
+        text = re.sub(
+            rf"^def\s+{re.escape(name)}\s*\(",
+            f"def {target_name}(",
+            text,
+            count=1,
+            flags=re.MULTILINE,
+        )
+    sig = re.search(
+        rf"^def\s+{re.escape(target_name)}\s*\(([^)]*)\)",
         text,
-        count=1,
-        flags=re.MULTILINE,
+        re.MULTILINE,
     )
+    if not sig:
+        return text
+    raw_args = [a.strip() for a in sig.group(1).split(",") if a.strip()]
+    arg_names = [a.split(":")[0].split("=")[0].strip() for a in raw_args]
+    if arg_names == ["state"]:
+        text = re.sub(
+            rf"^def\s+{re.escape(target_name)}\s*\([^)]*\)",
+            f"def {target_name}(state, memory)",
+            text,
+            count=1,
+            flags=re.MULTILINE,
+        )
+    return text

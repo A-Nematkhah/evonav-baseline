@@ -130,3 +130,16 @@ def test_ci_guard_in_paper_scale_script():
     text = open(script, encoding="utf-8").read()
     assert "CI" in text
     assert "Refusing paper-scale run under CI" in text
+    assert "Refusing to run a non-fast pipeline" in text
+    assert "--allow-seed-llm" in text
+
+
+def test_paper_scale_yaml_documents_seed_fail_closed():
+    spec = load_paper_scale_yaml()
+    assert spec.llm_provider == "seed"
+    yaml_path = os.path.join(
+        os.path.dirname(__file__), "..", "..", "..", "configs", "paper_scale.yaml"
+    )
+    text = open(os.path.abspath(yaml_path), encoding="utf-8").read()
+    assert "allow-seed-llm" in text or "fail-closes" in text or "fail-closed" in text.lower() or "Intentionally not a real LLM" in text
+

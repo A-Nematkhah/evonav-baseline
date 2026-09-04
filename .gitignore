@@ -15,7 +15,12 @@ evonav_env/data/stage1_dataset/
 evonav_env/.pip_cache/
 evonav_env/.tmp/
 
-# Python caches
+# Checkpoints / TensorBoard (never commit weights or event streams)
+*.pt
+*.pth
+events.out.tfevents.*
+
+# Python caches / editor junk
 __pycache__/
 *.pyc
 .pytest_cache/
@@ -24,6 +29,8 @@ __pycache__/
 *.log
 *.tmp
 *.bak
+*.swp
+Thumbs.db
 build/
 dist/
 .DS_Store

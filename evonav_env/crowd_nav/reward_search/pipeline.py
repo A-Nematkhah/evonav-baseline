@@ -18,6 +18,7 @@ from crowd_nav.reward_search.evolver import (
     StageIConfig,
     StageIEvolver,
 )
+from crowd_nav.reward_search import console
 from crowd_nav.reward_search.llm import LLMClient, make_llm_client
 from crowd_nav.reward_search.prompts import D5_SEED_FUNCTION
 from crowd_nav.reward_search.reporting import candidate_to_dict, write_json
@@ -184,8 +185,11 @@ class EvoNavPipeline:
         return ranked[0]
 
     def run(self) -> EvoNavArtifacts:
+        import time
+
         cfg = self.config
         os.makedirs(cfg.output_dir, exist_ok=True)
+        wall_t0 = time.perf_counter()
         from crowd_nav.reward_search.regime import (
             EVOLUTION_PREDICT_METHOD,
             assert_gst_matches_regime,
@@ -200,13 +204,14 @@ class EvoNavPipeline:
         predict_method = (cfg.predict_method or EVOLUTION_PREDICT_METHOD).strip().lower()
         cfg.predict_method = predict_method
         attrs, goals = randomization_flags(regime)
-        logger.info(
-            "EVOLUTION_RANDOMIZATION_REGIME=%s (randomize_attributes=%s, "
-            "random_goal_changing=%s); Stage II/III predict_method=%s",
-            regime,
-            attrs,
-            goals,
-            predict_method,
+        console.banner("EvoNav Algorithm 1")
+        console.status(
+            f"output={cfg.output_dir} seed={cfg.seed} llm={cfg.llm_provider} "
+            f"fast={cfg.fast} device={cfg.device}"
+        )
+        console.status(
+            f"regime={regime} (randomize_attributes={attrs}, "
+            f"random_goal_changing={goals}); predict_method={predict_method}"
         )
         if predict_method == "inferred":
             assert_gst_matches_regime(
@@ -245,7 +250,6 @@ class EvoNavPipeline:
             f.write(seed_code)
 
         # ----- Stage I -----
-        logger.info("=== Stage I (analytical evolution) ===")
         n = cfg.stage1_population
         n_crossover = min(2, n)
         n_mutation = min(4, max(0, n - n_crossover))
@@ -290,10 +294,12 @@ class EvoNavPipeline:
             os.path.join(cfg.output_dir, "best_stage1.json"),
             candidate_to_dict(best_s1),
         )
-        logger.info("Stage I best=%s score=%s", best_s1.candidate_id, best_s1.score)
+        console.status(
+            f"Stage I complete - best={best_s1.candidate_id} score={best_s1.score}",
+            stage="pipeline",
+        )
 
         # ----- Stage II -----
-        logger.info("=== Stage II (proxy A2C refinement) ===")
         s2_cfg = Stage2Config(
             population_size=len(stage1_pop),
             rounds=cfg.stage2_rounds,
@@ -309,6 +315,7 @@ class EvoNavPipeline:
         )
         if cfg.stage2_use_stub:
             s2_trainer = Stage2StubTrainer()
+            console.status("Stage II using StubPolicyTrainer", stage="pipeline")
         else:
             from crowd_nav.reward_search.stage2 import RealPolicyTrainer as S2Real
 
@@ -341,14 +348,12 @@ class EvoNavPipeline:
             os.path.join(cfg.output_dir, "best_stage2.json"),
             candidate_to_dict(best_s2),
         )
-        logger.info("Stage II best=%s", best_s2.candidate_id)
+        console.status(
+            f"Stage II complete - best={best_s2.candidate_id}",
+            stage="pipeline",
+        )
 
         # ----- Stage III -----
-        logger.info(
-            "=== Stage III (full PPO refinement, K3=%d paper=%d) ===",
-            cfg.stage3_train_steps,
-            STAGE3_PAPER_STEPS,
-        )
         s3_cfg = Stage3Config(
             population_size=len(stage2_pop),
             rounds=cfg.stage3_rounds,
@@ -364,6 +369,7 @@ class EvoNavPipeline:
         )
         if cfg.stage3_use_stub:
             s3_trainer = Stage3StubTrainer()
+            console.status("Stage III using StubPolicyTrainer", stage="pipeline")
         else:
             from crowd_nav.reward_search.stage3 import RealPolicyTrainer as S3Real
 
@@ -411,12 +417,24 @@ class EvoNavPipeline:
             os.path.join(cfg.output_dir, "final_candidate.json"),
             candidate_to_dict(best_s3),
         )
-        logger.info("Stage III best=%s", best_s3.candidate_id)
+        console.status(
+            f"Stage III complete - best={best_s3.candidate_id}",
+            stage="pipeline",
+        )
 
         manifest["best_stage1_id"] = best_s1.candidate_id
         manifest["best_stage2_id"] = best_s2.candidate_id
         manifest["best_stage3_id"] = best_s3.candidate_id
         write_json(os.path.join(cfg.output_dir, "manifest.json"), manifest)
+
+        wall = time.perf_counter() - wall_t0
+        console.final_run_summary(
+            output_dir=cfg.output_dir,
+            wall_seconds=wall,
+            best_stage1=best_s1,
+            best_stage2=best_s2,
+            best_stage3=best_s3,
+        )
 
         return EvoNavArtifacts(
             output_dir=cfg.output_dir,

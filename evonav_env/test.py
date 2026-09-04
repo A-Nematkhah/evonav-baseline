@@ -123,7 +123,11 @@ def main():
 
 
 	load_path=os.path.join(test_args.model_dir,'checkpoints', test_args.test_model)
-	print(load_path)
+	print(f"[test] loading checkpoint: {load_path}")
+	print(
+		f"[test] env={algo_args.env_name} | episodes={config.env.test_size} | "
+		f"policy={config.robot.policy} | device={device}"
+	)
 
 
 	# create an environment

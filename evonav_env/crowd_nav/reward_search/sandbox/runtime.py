@@ -2,13 +2,19 @@
 Restricted execution of validated reward source.
 
 Ported from mobile_robot_env.rewards.sandbox.runtime; adapted to RewardState.
+
+Episode memory contract (option a — function-only stateful rewards):
+  ``compute_reward(state, memory)`` where ``memory`` is a plain ``dict``
+  owned by :class:`SandboxedReward`. ``reset()`` clears it; ``compute()``
+  passes the same dict for every step within an episode. Classes are
+  forbidden by the AST policy — do not teach class-based rewards in prompts.
 """
 
 from __future__ import annotations
 
 import math
 import threading
-from typing import Callable, Sequence
+from typing import Any, Callable, Dict, Optional, Sequence
 
 from crowd_nav.reward_search.sandbox.config import SandboxConfig
 from crowd_nav.reward_search.sandbox.errors import RewardSandboxError
@@ -19,7 +25,7 @@ from crowd_nav.reward_search.state import (
     RobotRewardState,
 )
 
-ComputeFn = Callable[[RewardState], float]
+ComputeFn = Callable[[RewardState, Dict[str, Any]], float]
 
 _SAFE_BUILTINS = {
     "abs": abs,
@@ -119,14 +125,15 @@ def smoke_test_compute(
     states: Sequence[RewardState],
     config: SandboxConfig,
 ) -> None:
-    """Call compute_fn on each smoke state; require finite floats within timeout."""
+    """Call compute_fn on each smoke state with a fresh memory dict."""
     if not states:
         raise RewardSandboxError("smoke test requires at least one RewardState")
 
     def _run() -> None:
+        memory: Dict[str, Any] = {}
         for state in states:
             try:
-                value = compute_fn(state)
+                value = compute_fn(state, memory)
             except RewardSandboxError:
                 raise
             except Exception as exc:
@@ -187,6 +194,23 @@ def default_smoke_states() -> tuple[RewardState, ...]:
         make_state(dmin=-0.05, collision=True, human_d=0.4),
         make_state(dmin=2.0, timeout=True),
         make_state(dmin=0.5, px=1.0, gx=5.0),
+        # Exercise common LLM failure modes before a candidate reaches rollout.
+        make_state(
+            dmin=0.0,
+            px=1.0e6,
+            py=-1.0e6,
+            gx=-1.0e6,
+            gy=1.0e6,
+            human_d=1.0e-6,
+        ),
+        make_state(
+            dmin=1.0e-8,
+            px=-1.0e6,
+            py=1.0e6,
+            gx=1.0e6,
+            gy=-1.0e6,
+            human_d=1.0e-6,
+        ),
     )
 
 
@@ -194,20 +218,29 @@ class SandboxedReward(RewardFunction):
     """
     RewardFunction wrapper around a sandbox-compiled compute_reward.
 
-    Every call re-checks type and finiteness. Timeout is enforced at
-    validation/smoke time, not on every PPO step.
+    Owns a per-episode ``memory`` dict: cleared on ``reset()``, passed as the
+    second argument on every ``compute(state)`` call. Source code is retained
+    so the object can be cloudpickled into ShmemVecEnv workers (Windows spawn).
     """
 
-    def __init__(self, compute_fn: ComputeFn, config: SandboxConfig) -> None:
+    def __init__(
+        self,
+        compute_fn: ComputeFn,
+        config: SandboxConfig,
+        *,
+        source_code: Optional[str] = None,
+    ) -> None:
         self._compute_fn = compute_fn
         self._config = config
+        self._source_code = source_code
+        self._memory: Dict[str, Any] = {}
 
     def reset(self) -> None:
-        return None
+        self._memory.clear()
 
     def compute(self, state: RewardState) -> float:
         try:
-            value = self._compute_fn(state)
+            value = self._compute_fn(state, self._memory)
         except RewardSandboxError:
             raise
         except Exception as exc:
@@ -215,3 +248,20 @@ class SandboxedReward(RewardFunction):
                 f"runtime error in sandboxed compute(): {type(exc).__name__}: {exc}"
             ) from exc
         return require_finite_float(value)
+
+    def __getstate__(self) -> Dict[str, Any]:
+        if not self._source_code:
+            raise RewardSandboxError(
+                "SandboxedReward cannot be pickled without source_code "
+                "(required for multi-process vec envs)"
+            )
+        return {
+            "config": self._config,
+            "source_code": self._source_code,
+        }
+
+    def __setstate__(self, state: Dict[str, Any]) -> None:
+        self._config = state["config"]
+        self._source_code = state["source_code"]
+        self._memory = {}
+        self._compute_fn = compile_compute_reward(self._source_code, self._config)

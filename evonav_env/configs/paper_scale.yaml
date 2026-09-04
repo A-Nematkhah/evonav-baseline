@@ -8,6 +8,10 @@
 #   K2, G2, E2     Stage II train steps / rounds / eval episodes
 #   K3, G3, E3     Stage III train steps / rounds / eval episodes
 #   M, N_traj      Stage I trajectory dataset size (collect once)
+#
+# llm_provider defaults to seed for offline YAML parsing, but
+# ``run_evonav_paper_scale.py`` fail-closes unless you pass a real
+# ``--llm`` or ``--allow-seed-llm``.
 
 scale: paper
 
@@ -43,6 +47,7 @@ EVOLUTION_RANDOMIZATION_REGIME: without_random
 predict_method: inferred
 
 device: cuda
+# Intentionally not a real LLM — entry script requires --llm or --allow-seed-llm.
 llm_provider: seed
 output_dir: results/paper_scale
 cost_log: results/paper_scale/cost_log.json

@@ -32,11 +32,10 @@ py -3.10 -m venv .venv
   the installed NVIDIA driver. Do not use a second system-Python environment
   or a `PYTHONPATH` workaround.
 
-3. Install [OpenAI Baselines](https://github.com/openai/baselines#installation) 
+3. Install the **vendored** OpenAI Baselines slice at repo root
+   (trimmed — vec_env / logger / bench only; see `../baselines_openai/README.md`):
 ```
-git clone https://github.com/openai/baselines.git
-cd baselines
-pip install -e .
+pip install -e ../baselines_openai
 ```
 
 4. Install [Python-RVO2](https://github.com/sybrenstuvel/Python-RVO2) in the same environment
@@ -49,9 +48,9 @@ pip install -e .
 This repository is organized in five parts: 
 - `crowd_nav/` folder contains configurations and policies used in the simulator.
 - `crowd_sim/` folder contains the simulation environment. 
-- `gst_updated/` folder contains the code for running inference of a human trajectory predictor, named Gumbel Social Transformer (GST) [2].
-- `rl/` contains the code for the RL policy networks, wrappers for the prediction network, and ppo algorithm. 
-- `trained_models/` contains some pretrained models provided by us. 
+- `gst_updated/` folder contains GST **inference** code (pretrained predictor; training scripts removed in this fork).
+- `rl/` folder contains policy networks, prediction wrappers, and PPO/A2C.
+- `trained_models/` contains pretrained baselines (gitignored; download from upstream if missing).
 
 Note that this repository does not include codes for training a trajectory prediction network. Please refer to from [this repo](https://github.com/tedhuang96/gst) instead.
 

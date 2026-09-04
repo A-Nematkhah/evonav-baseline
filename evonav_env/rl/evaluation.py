@@ -45,8 +45,19 @@ def evaluate(actor_critic, eval_envs, num_processes, device, test_size, logging,
         baseEnv = eval_envs.venv.unwrapped.envs[0].env
     time_limit = baseEnv.time_limit
 
+    # Per-episode prints flood the terminal; keep them for visualize/--verbose only.
+    verbose_episodes = bool(getattr(args, "verbose", False) or visualize)
+    print(f"[eval] running {test_size} episodes (verbose_episodes={verbose_episodes})")
+    try:
+        from crowd_nav.reward_search.console import progress as _progress
+        episode_iter = _progress(
+            range(test_size), total=test_size, desc="[eval] episodes", unit="ep"
+        )
+    except Exception:
+        episode_iter = range(test_size)
+
     # start the testing episodes
-    for k in range(test_size):
+    for k in episode_iter:
         baseEnv.episode_k = k
         done = False
         rewards = []
@@ -111,31 +122,31 @@ def evaluate(actor_critic, eval_envs, num_processes, device, test_size, logging,
                     eval_episode_rewards.append(info['episode']['r'])
 
         # an episode ends!
-        print('')
-        print('Reward={}'.format(episode_rew))
-        print('Episode', k, 'ends in', stepCounter)
         all_path_len.append(path_len)
         too_close_ratios.append(too_close/stepCounter*100)
 
-
+        outcome = "?"
         if isinstance(infos[0]['info'], ReachGoal):
             success += 1
             success_times.append(global_time)
-            print('Success')
+            outcome = "Success"
         elif isinstance(infos[0]['info'], Collision):
             collision += 1
             collision_cases.append(k)
             collision_times.append(global_time)
-            print('Collision')
+            outcome = "Collision"
         elif isinstance(infos[0]['info'], Timeout):
             timeout += 1
             timeout_cases.append(k)
             timeout_times.append(time_limit)
-            print('Time out')
+            outcome = "Time out"
         elif isinstance(infos[0]['info'] is None):
             pass
         else:
             raise ValueError('Invalid end signal from environment')
+
+        if verbose_episodes:
+            print(f"Episode {k}: {outcome} reward={episode_rew} steps={stepCounter}")
 
     # all episodes end
     success_rate = success / test_size

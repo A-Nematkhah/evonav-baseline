@@ -1,3 +1,4 @@
+import logging
 import os
 
 import gym
@@ -7,44 +8,26 @@ from gym.spaces.box import Box
 from gym.spaces.dict import Dict
 
 from baselines import bench
-from baselines.common.atari_wrappers import make_atari, wrap_deepmind
 from baselines.common.vec_env import VecEnvWrapper
-# from baselines.common.vec_env.dummy_vec_env import DummyVecEnv
-# from baselines.common.vec_env.shmem_vec_env import ShmemVecEnv
 from rl.networks.dummy_vec_env import DummyVecEnv
 from rl.networks.shmem_vec_env import ShmemVecEnv
 from baselines.common.vec_env.vec_normalize import \
     VecNormalize as VecNormalize_
 from rl.vec_env.vec_pretext_normalize import VecPretextNormalize
 
-try:
-    import dm_control2gym
-except ImportError:
-    pass
-
-try:
-    import roboschool
-except ImportError:
-    pass
-
-try:
-    import pybullet_envs
-except ImportError:
-    pass
+logger = logging.getLogger(__name__)
 
 
 def make_env(env_id, seed, rank, log_dir, allow_early_resets, config=None, envNum=1, ax=None, test_case=-1,
              reward_fn=None):
     def _thunk():
-        if env_id.startswith("dm"):
-            _, domain, task = env_id.split('.')
-            env = dm_control2gym.make(domain_name=domain, task_name=task)
-        else:
-            env = gym.make(env_id)
+        env = gym.make(env_id)
 
         is_atari = hasattr(gym.envs, 'atari') and isinstance(
             env.unwrapped, gym.envs.atari.atari_env.AtariEnv)
         if is_atari:
+            # Lazy: Atari wrappers pull opencv; CrowdSim never hits this branch.
+            from baselines.common.atari_wrappers import make_atari
             env = make_atari(env_id)
 
         env.configure(config)
@@ -81,11 +64,13 @@ def make_env(env_id, seed, rank, log_dir, allow_early_resets, config=None, envNu
             env,
             None,
             allow_early_resets=allow_early_resets)
-        print(env)
+        # Per-env construction is noisy at INFO; keep for DEBUG only.
+        logger.debug("make_env: %s", env)
 
         if isinstance(env.observation_space, Box):
             if is_atari:
                 if len(env.observation_space.shape) == 3:
+                    from baselines.common.atari_wrappers import wrap_deepmind
                     env = wrap_deepmind(env)
             elif len(env.observation_space.shape) == 3:
                 raise NotImplementedError(
@@ -124,7 +109,9 @@ def make_vec_envs(env_name,
     test = False if len(envs) > 1 else True
 
     if len(envs) > 1:
-        envs = ShmemVecEnv(envs, context='fork')
+        # fork is unavailable / unsafe on Windows; spawn matches rl/vec_env/envs.py.
+        context = "spawn" if os.name == "nt" else "fork"
+        envs = ShmemVecEnv(envs, context=context)
     else:
         envs = DummyVecEnv(envs)
     # for collect data in supervised learning, we don't need to wrap pytorch

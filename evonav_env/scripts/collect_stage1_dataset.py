@@ -289,10 +289,24 @@ def _collect_dataset_impl(
         prefer = [0, 3, 6, 8, 1, 4, 7, 9, 2, 5]
         schedule = [full_schedule[i] for i in prefer[:n_traj]]
 
-    for j in range(n_scenarios):
+    from crowd_nav.reward_search import console
+    import time as _time
+
+    t0 = _time.perf_counter()
+    console.status(
+        f"collecting Stage I dataset: M={n_scenarios} scenarios × "
+        f"N_traj={len(schedule)} → {out_dir}",
+        stage="Stage I collect",
+    )
+    scenario_iter = console.progress(
+        range(n_scenarios),
+        total=n_scenarios,
+        desc="[Stage I collect] scenarios",
+        unit="sc",
+    )
+    for j in scenario_iter:
         sid = f"scenario_{j:03d}"
         trajs: List[TrajectoryRecord] = []
-        logging.info("Scenario %s (%d/%d)", sid, j + 1, n_scenarios)
         for t_idx, (policy_name, noise, is_random) in enumerate(schedule):
             _reset_scenario(env, scenario_id=j, base_seed=base_seed)
             if not is_random:
@@ -311,6 +325,10 @@ def _collect_dataset_impl(
                     random_action=is_random,
                 )
             except Exception as exc:  # noqa: BLE001
+                console.fail(
+                    f"traj {t_idx} failed ({behavior}): {exc}",
+                    stage="Stage I collect",
+                )
                 logging.warning("traj %d failed (%s): %s — skipping", t_idx, behavior, exc)
                 continue
             trajs.append(
@@ -326,14 +344,21 @@ def _collect_dataset_impl(
             )
         dataset[sid] = trajs
         labels = [t.label for t in trajs]
-        logging.info(
+        logging.debug(
             "  collected %d trajs labels=%s",
             len(trajs),
             {k: labels.count(k) for k in sorted(set(labels))},
         )
 
     save_stage1_dataset(dataset, out_dir, fmt=fmt)
-    logging.info("Wrote Stage I dataset → %s (%d scenarios, fmt=%s)", out_dir, len(dataset), fmt)
+    from crowd_nav.reward_search import console as _console
+
+    _console.status(
+        f"Wrote Stage I dataset → {out_dir} "
+        f"({len(dataset)} scenarios, fmt={fmt}) in "
+        f"{_console.format_seconds(_time.perf_counter() - t0)}",
+        stage="Stage I collect",
+    )
 
 
 def main() -> int:
@@ -353,6 +378,11 @@ def main() -> int:
         choices=["without_random", "with_random", "both"],
         help="EVOLUTION_RANDOMIZATION_REGIME (default: without_random; AUDIT.md §8.1)",
     )
+    parser.add_argument(
+        "--verbose",
+        action="store_true",
+        help="Log per-scenario label breakdowns at INFO",
+    )
     args = parser.parse_args()
     if args.regime == "both":
         print(
@@ -363,7 +393,13 @@ def main() -> int:
         return 2
     sys.argv = [sys.argv[0], "--no-cuda", "--num-processes", "1"]
 
-    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
+    logging.basicConfig(
+        level=logging.DEBUG if args.verbose else logging.INFO,
+        format="%(levelname)s %(message)s",
+    )
+    from crowd_nav.reward_search import console as _console
+
+    _console.set_verbose(bool(args.verbose))
     collect_dataset(
         n_scenarios=args.n_scenarios,
         n_traj=args.n_traj,

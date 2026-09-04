@@ -11,6 +11,11 @@ __pycache__/
 .ruff_cache/
 *.log
 *.tmp
+*.swp
+Thumbs.db
+*.pt
+*.pth
+events.out.tfevents.*
 build/
 dist/
 .DS_Store

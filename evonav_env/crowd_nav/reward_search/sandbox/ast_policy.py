@@ -105,7 +105,7 @@ def check_structure(tree: ast.Module, config: SandboxConfig) -> None:
 
 
 def check_interface(tree: ast.Module, config: SandboxConfig) -> ast.FunctionDef:
-    """Require exactly one top-level function: compute_reward(state)."""
+    """Require exactly one top-level function: compute_reward(state, memory)."""
     functions = [node for node in tree.body if isinstance(node, ast.FunctionDef)]
     other = [
         node
@@ -130,16 +130,18 @@ def check_interface(tree: ast.Module, config: SandboxConfig) -> ast.FunctionDef:
     if fn.args.kwonlyargs:
         raise RewardSandboxError("compute_reward must not use keyword-only arguments")
     positional = list(fn.args.posonlyargs) + list(fn.args.args)
-    if len(positional) != 1:
+    expected = (config.required_arg_name, config.required_memory_arg_name)
+    if len(positional) != 2:
         raise RewardSandboxError(
-            f"compute_reward must take exactly one argument ({config.required_arg_name}), "
+            f"compute_reward must take exactly two arguments {expected}, "
             f"found {len(positional)}"
         )
-    if positional[0].arg != config.required_arg_name:
-        raise RewardSandboxError(
-            f"compute_reward argument must be named {config.required_arg_name!r}, "
-            f"got {positional[0].arg!r}"
-        )
+    for i, name in enumerate(expected):
+        if positional[i].arg != name:
+            raise RewardSandboxError(
+                f"compute_reward argument {i + 1} must be named {name!r}, "
+                f"got {positional[i].arg!r}"
+            )
     if fn.args.defaults:
         raise RewardSandboxError("compute_reward must not use default argument values")
     return fn

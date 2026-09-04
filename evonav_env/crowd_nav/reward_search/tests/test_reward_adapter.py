@@ -402,7 +402,7 @@ def test_custom_reward_fn_invoked_without_changing_termination():
 
 
 VALID_CODE = """
-def compute_reward(state):
+def compute_reward(state, memory):
     reward = 0.0
     if state.reaching_goal:
         reward = reward + 10.0
@@ -421,21 +421,21 @@ def test_sandbox_accepts_valid_code():
 
 
 def test_sandbox_rejects_import():
-    code = "import os\ndef compute_reward(state):\n    return 0.0\n"
+    code = "import os\ndef compute_reward(state, memory):\n    return 0.0\n"
     with pytest.raises(RewardSandboxError) as exc:
         RewardValidator().validate_code(code)
     assert "import" in str(exc.value).lower()
 
 
 def test_sandbox_rejects_eval():
-    code = "def compute_reward(state):\n    return eval('1+1')\n"
+    code = "def compute_reward(state, memory):\n    return eval('1+1')\n"
     with pytest.raises(RewardSandboxError) as exc:
         RewardValidator().validate_code(code)
     assert "eval" in str(exc.value)
 
 
 def test_sandbox_rejects_while():
-    code = "def compute_reward(state):\n    while True:\n        pass\n    return 0.0\n"
+    code = "def compute_reward(state, memory):\n    while True:\n        pass\n    return 0.0\n"
     with pytest.raises(RewardSandboxError) as exc:
         RewardValidator().validate_code(code)
     assert "while" in str(exc.value).lower()
@@ -443,7 +443,7 @@ def test_sandbox_rejects_while():
 
 def test_sandbox_rejects_infinite_loop_timeout():
     code = """
-def compute_reward(state):
+def compute_reward(state, memory):
     x = 0.0
     for i in range(10 ** 12):
         x = x + 1.0
@@ -456,21 +456,82 @@ def compute_reward(state):
 
 
 def test_sandbox_rejects_non_finite():
-    code = "def compute_reward(state):\n    return math.inf\n"
+    code = "def compute_reward(state, memory):\n    return math.inf\n"
     with pytest.raises(RewardSandboxError) as exc:
         RewardValidator().validate_code(code)
     assert "non-finite" in str(exc.value).lower() or "finite" in str(exc.value).lower()
 
 
+def test_sandbox_rejects_numeric_overflow_before_rollout():
+    code = """
+def compute_reward(state, memory):
+    return math.exp(abs(state.robot.px - state.robot.gx))
+"""
+    with pytest.raises(RewardSandboxError) as exc:
+        RewardValidator().validate_code(code)
+    assert "overflow" in str(exc.value).lower() or "finite" in str(exc.value).lower()
+
+
 def test_sandbox_isinstance_is_available():
     code = """
-def compute_reward(state):
+def compute_reward(state, memory):
     if isinstance(state.collision, bool):
         return float(1.0)
     return float(0.0)
 """
     fn = RewardValidator().validate_code(code)
     assert fn.compute(_make_state()) == pytest.approx(1.0)
+
+
+def test_prompt_memory_example_validates_in_sandbox():
+    """Regression: prompts.py examples must always pass the sandbox."""
+    from crowd_nav.reward_search.prompts import D5_SEED_FUNCTION, PROMPT_MEMORY_EXAMPLE
+
+    validator = RewardValidator()
+    for label, code in (
+        ("PROMPT_MEMORY_EXAMPLE", PROMPT_MEMORY_EXAMPLE),
+        ("D5_SEED_FUNCTION", D5_SEED_FUNCTION),
+    ):
+        reward_fn, err = validator.try_validate(code)
+        assert reward_fn is not None, f"{label} failed sandbox: {err}"
+        assert "class MyReward" not in code
+        reward_fn.reset()
+        s0 = _make_state(
+            robot=RobotRewardState(
+                px=0.0, py=0.0, vx=0.5, vy=0.0, radius=0.3, gx=4.0, gy=0.0, v_pref=1.0
+            )
+        )
+        s1 = _make_state(
+            robot=RobotRewardState(
+                px=1.0, py=0.0, vx=0.5, vy=0.0, radius=0.3, gx=4.0, gy=0.0, v_pref=1.0
+            )
+        )
+        r0 = reward_fn.compute(s0)
+        r1 = reward_fn.compute(s1)
+        assert r0 == r0 and r1 == r1  # finite
+
+
+def test_memory_cleared_on_reset():
+    from crowd_nav.reward_search.prompts import PROMPT_MEMORY_EXAMPLE
+
+    fn = RewardValidator().validate_code(PROMPT_MEMORY_EXAMPLE)
+    s0 = _make_state(
+        robot=RobotRewardState(
+            px=0.0, py=0.0, vx=0.5, vy=0.0, radius=0.3, gx=4.0, gy=0.0, v_pref=1.0
+        )
+    )
+    s1 = _make_state(
+        robot=RobotRewardState(
+            px=1.0, py=0.0, vx=0.5, vy=0.0, radius=0.3, gx=4.0, gy=0.0, v_pref=1.0
+        )
+    )
+    fn.reset()
+    first = fn.compute(s0)
+    second = fn.compute(s1)
+    assert second == pytest.approx(1.0)  # moved 1m closer → progress 1.0
+    fn.reset()
+    again = fn.compute(s0)
+    assert again == pytest.approx(first)
 
 
 def test_reward_adapter_governs_crowdsimpredrealgst():

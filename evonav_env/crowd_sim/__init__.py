@@ -16,16 +16,6 @@ register(
 )
 
 register(
-    id='CrowdSimVarNumCollect-v0',
-    entry_point='crowd_sim.envs:CrowdSimVarNumCollect',
-)
-
-register(
     id='CrowdSimPredRealGST-v0',
     entry_point='crowd_sim.envs:CrowdSimPredRealGST',
-)
-
-register(
-    id='rosTurtlebot2iEnv-v0',
-    entry_point='crowd_sim.envs.ros_turtlebot2i_env:rosTurtlebot2iEnv',
 )

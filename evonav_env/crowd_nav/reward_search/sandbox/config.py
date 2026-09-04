@@ -12,6 +12,7 @@ from typing import Tuple
 
 REQUIRED_FUNCTION_NAME = "compute_reward"
 REQUIRED_ARG_NAME = "state"
+REQUIRED_MEMORY_ARG_NAME = "memory"
 
 ALLOWED_MODULES: Tuple[str, ...] = ("math",)
 
@@ -70,6 +71,7 @@ class SandboxConfig:
     max_code_length: int = 20_000
     required_function_name: str = REQUIRED_FUNCTION_NAME
     required_arg_name: str = REQUIRED_ARG_NAME
+    required_memory_arg_name: str = REQUIRED_MEMORY_ARG_NAME
     allowed_modules: Tuple[str, ...] = ALLOWED_MODULES
     forbidden_names: Tuple[str, ...] = FORBIDDEN_NAME_IDS
     allow_while: bool = False

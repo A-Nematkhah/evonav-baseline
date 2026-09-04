@@ -141,6 +141,20 @@ def main():
 		algo_args.num_env_steps) // algo_args.num_steps // algo_args.num_processes
 
 	# start the training loop
+	print(
+		f"[train] starting {algo_args.algo} | env={env_name} | "
+		f"updates={num_updates} | steps/update={algo_args.num_steps} | "
+		f"nproc={algo_args.num_processes} | total_env_steps={algo_args.num_env_steps} | "
+		f"output={algo_args.output_dir}"
+	)
+	try:
+		from crowd_nav.reward_search.console import progress as _progress
+	except Exception:
+		_progress = None
+	_pbar = None
+	if _progress is not None:
+		_pbar = _progress(total=num_updates, desc="[train] PPO updates", unit="upd")
+
 	for j in range(num_updates):
 		# schedule learning rate if needed
 		if algo_args.use_linear_lr_decay:
@@ -208,6 +222,8 @@ def main():
 		value_loss, action_loss, dist_entropy = agent.update(rollouts)
 
 		rollouts.after_update()
+		if _pbar is not None:
+			_pbar.update(1)
 
 		# save the model for every interval-th episode or for the last epoch
 		if (j % algo_args.save_interval == 0
@@ -240,6 +256,10 @@ def main():
 				df.to_csv(os.path.join(algo_args.output_dir, 'progress.csv'), mode='a', header=False, index=False)
 			else:
 				df.to_csv(os.path.join(algo_args.output_dir, 'progress.csv'), mode='w', header=True, index=False)
+
+	if _pbar is not None:
+		_pbar.close()
+	print(f"[train] finished in {time.time() - start:.1f}s → {algo_args.output_dir}")
 
 	envs.close()
 

@@ -48,7 +48,18 @@ def main() -> int:
         type=str,
         default="seed",
         choices=["seed", "groq", "vllm", "ollama", "scripted"],
-        help="LLM provider (seed = local D.5 variants, no API key)",
+        help="LLM provider (seed = local D.5 variants, no API key; "
+        "non-fast runs require a real provider or --allow-seed-llm)",
+    )
+    parser.add_argument(
+        "--allow-seed-llm",
+        action="store_true",
+        help="Permit --llm seed on a non-fast run (debug / wiring without API cost)",
+    )
+    parser.add_argument(
+        "--verbose",
+        action="store_true",
+        help="Extra DEBUG-level terminal detail (sandbox previews, etc.)",
     )
     parser.add_argument(
         "--score1",
@@ -115,14 +126,32 @@ def main() -> int:
         )
         return 2
 
+    # Fail closed before Config / GST / dataset / simulator work.
+    if (
+        not args.fast
+        and str(args.llm).strip().lower() == "seed"
+        and not args.allow_seed_llm
+    ):
+        print(
+            "Refusing to run a non-fast pipeline with the seed (no real LLM) "
+            "provider — pass --llm groq|ollama|vllm explicitly, or pass "
+            "--allow-seed-llm if this is intentional (e.g. debugging Stage II/III "
+            "wiring without LLM cost).",
+            file=sys.stderr,
+        )
+        return 2
+
     # Protect Config.get_args() class-body from our CLI flags.
     sys.argv = [sys.argv[0], "--no-cuda" if args.device == "cpu" else "--seed", str(args.seed)]
 
     logging.basicConfig(
-        level=logging.INFO,
+        level=logging.DEBUG if args.verbose else logging.INFO,
         format="%(asctime)s %(levelname)s %(message)s",
         datefmt="%H:%M:%S",
     )
+    from crowd_nav.reward_search import console as _console
+
+    _console.set_verbose(bool(args.verbose))
 
     import crowd_sim  # noqa: F401
 

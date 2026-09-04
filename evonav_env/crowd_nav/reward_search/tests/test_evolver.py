@@ -27,7 +27,7 @@ from crowd_nav.reward_search.sandbox.runtime import default_smoke_states
 def _valid_code(value: float) -> str:
     return (
         "```python\n"
-        "def compute_reward(state):\n"
+        "def compute_reward(state, memory):\n"
         f"    return float({value})\n"
         "```\n"
     )
@@ -37,7 +37,7 @@ def _invalid_import_code() -> str:
     return (
         "```python\n"
         "import os\n"
-        "def compute_reward(state):\n"
+        "def compute_reward(state, memory):\n"
         "    return float(0.0)\n"
         "```\n"
     )
@@ -52,7 +52,7 @@ def test_extract_and_normalize_code():
     code = extract_python_code(raw)
     assert "def cal_reward" in code
     norm = normalize_to_compute_reward(code)
-    assert "def compute_reward(state)" in norm
+    assert "def compute_reward(state, memory)" in norm
     assert "cal_reward" not in norm
 
 
@@ -62,14 +62,17 @@ def test_prompt_templates_contain_appendix_anchors():
     assert "compute_reward" in user
     assert "RewardState" in user
     assert "keep exploring" in user
+    assert "memory" in user
+    assert "class MyReward" not in user
     assert "Crowd-robot navigation" in D4_EXTERNAL_KNOWLEDGE
-    assert "def compute_reward(state)" in D5_SEED_FUNCTION
+    assert "def compute_reward(state, memory)" in D5_SEED_FUNCTION
     cross = format_d2_crossover("codeA", "codeB", "note")
     assert "codeA" in cross and "codeB" in cross
     assert "getattr" in cross and "state.robot.px" in cross
     mut = format_d2_mutation("elitist", "weakness")
     assert "elitist" in mut and "weakness" in mut
     assert "getattr" in mut
+    assert "state, memory" in mut
 
 
 def test_scripted_generate_n():

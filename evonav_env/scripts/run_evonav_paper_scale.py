@@ -72,7 +72,17 @@ def main() -> int:
         "--llm",
         type=str,
         default=None,
-        choices=["seed", "groq", "vllm", "scripted"],
+        choices=["seed", "groq", "vllm", "ollama", "scripted"],
+    )
+    parser.add_argument(
+        "--allow-seed-llm",
+        action="store_true",
+        help="Permit llm_provider=seed (YAML default or --llm seed) without a real LLM",
+    )
+    parser.add_argument(
+        "--verbose",
+        action="store_true",
+        help="Extra DEBUG-level terminal detail",
     )
     parser.add_argument(
         "--dry-run-stubs",
@@ -102,10 +112,13 @@ def main() -> int:
     ]
 
     logging.basicConfig(
-        level=logging.INFO,
+        level=logging.DEBUG if args.verbose else logging.INFO,
         format="%(asctime)s %(levelname)s %(message)s",
         datefmt="%H:%M:%S",
     )
+    from crowd_nav.reward_search import console as _console
+
+    _console.set_verbose(bool(args.verbose))
 
     from crowd_nav.reward_search.paper_scale import PaperScaleRunner
     from crowd_nav.reward_search.presets import load_paper_scale_yaml
@@ -114,6 +127,16 @@ def main() -> int:
     spec = load_paper_scale_yaml(args.config)
     if args.regime is not None:
         spec = replace(spec, randomization_regime=args.regime)
+    resolved_llm = (args.llm or spec.llm_provider or "seed").strip().lower()
+    if resolved_llm == "seed" and not args.allow_seed_llm and not args.dry_run_stubs:
+        print(
+            "Refusing to run a non-fast pipeline with the seed (no real LLM) "
+            "provider — pass --llm groq|ollama|vllm explicitly, or pass "
+            "--allow-seed-llm if this is intentional (e.g. debugging Stage II/III "
+            "wiring without LLM cost).",
+            file=sys.stderr,
+        )
+        return 2
     seeds = _parse_seeds(args.seeds)
     runner = PaperScaleRunner(
         spec,

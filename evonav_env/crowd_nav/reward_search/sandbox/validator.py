@@ -47,12 +47,18 @@ class RewardValidator:
         if not code or not str(code).strip():
             raise RewardSandboxError("no source code to validate")
 
+        # Normalize aliases / missing memory arg before AST checks so prompt
+        # examples and LLM outputs share one sandbox contract.
+        from crowd_nav.reward_search.llm import normalize_to_compute_reward
+
+        code = normalize_to_compute_reward(str(code))
+
         tree = parse_reward_code(code, self.config)
         check_structure(tree, self.config)
         check_interface(tree, self.config)
         compute_fn = compile_compute_reward(code, self.config)
         smoke_test_compute(compute_fn, self.smoke_states, self.config)
-        return SandboxedReward(compute_fn, self.config)
+        return SandboxedReward(compute_fn, self.config, source_code=code)
 
     def try_validate(self, code: str) -> Tuple[Optional[SandboxedReward], Optional[str]]:
         """Return (reward, None) on success or (None, reason) on failure."""

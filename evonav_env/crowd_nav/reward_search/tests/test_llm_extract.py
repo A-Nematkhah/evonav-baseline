@@ -35,7 +35,7 @@ def test_split_reward_function_sources_multiple_defs():
     )
     parts = split_reward_function_sources(raw)
     assert len(parts) == 2
-    assert all("def compute_reward(state)" in p for p in parts)
+    assert all("def compute_reward(state, memory)" in p for p in parts)
 
 
 def test_format_d1_initial_batch_asks_for_n_functions():

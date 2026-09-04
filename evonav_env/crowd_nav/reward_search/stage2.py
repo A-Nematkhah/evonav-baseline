@@ -20,6 +20,7 @@ import logging
 import os
 import re
 import sys
+import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, replace
 from typing import Any, Dict, List, Optional, Sequence
@@ -29,10 +30,15 @@ import torch
 import torch.nn as nn
 
 from crowd_nav.reward_search.evolver import RewardCandidate
+from crowd_nav.reward_search import console
 from crowd_nav.reward_search.llm import (
     LLMClient,
     extract_python_code,
     normalize_to_compute_reward,
+)
+from crowd_nav.reward_search.parallelism import (
+    default_num_mini_batch,
+    resolve_num_processes,
 )
 from crowd_nav.reward_search.prompts import D3_SYSTEM_PROMPT, format_d3_refinement
 from crowd_nav.reward_search.sandbox import RewardValidator
@@ -56,9 +62,11 @@ class Stage2Config:
     eval_episodes: int = 50  # E2
     horizon_steps: int = 100  # T_short
     algo: str = "a2c"
-    num_processes: int = 1
+    # None → resolve_num_processes() at train time (min(16, cpu_count-1)).
+    num_processes: Optional[int] = None
     num_steps: int = 5  # A2C n-step (arguments.py help text default)
-    num_mini_batch: int = 1
+    # None → default_num_mini_batch(resolved num_processes).
+    num_mini_batch: Optional[int] = None
     seed: int = 425
     # Choice (a): GST-inferred obs parity with CrowdNav++ (AUDIT.md §8.2).
     env_name: str = "CrowdSimPredRealGST-v0"
@@ -181,6 +189,14 @@ def _stage2_train_argv(
     out_dir = os.path.join(
         config.output_root, f"r{round_index:02d}_{candidate_id}"
     )
+    nproc = resolve_num_processes(config.num_processes)
+    nbatch = (
+        max(1, int(config.num_mini_batch))
+        if config.num_mini_batch is not None
+        else default_num_mini_batch(nproc)
+    )
+    if nbatch > nproc:
+        nbatch = nproc
     argv = [
         "stage2_train",
         "--algo",
@@ -188,13 +204,13 @@ def _stage2_train_argv(
         "--num-env-steps",
         str(int(config.train_env_steps)),
         "--num-processes",
-        str(config.num_processes),
+        str(nproc),
         "--num-steps",
         str(config.num_steps),
         "--seq_length",
         str(config.num_steps),
         "--num-mini-batch",
-        str(config.num_mini_batch),
+        str(nbatch),
         "--seed",
         str(config.seed + round_index),
         "--env-name",
@@ -376,54 +392,81 @@ class RealPolicyTrainer(PolicyTrainer):
             // algo_args.num_steps
             // algo_args.num_processes
         )
-        for _j in range(num_updates):
-            for step in range(algo_args.num_steps):
+        console.status(
+            f"training {candidate.candidate_id} round={round_index} "
+            f"algo={config.algo} K2={config.train_env_steps} "
+            f"updates={num_updates} nproc={algo_args.num_processes}",
+            stage="Stage II",
+        )
+        pbar = console.progress(
+            total=max(1, num_updates),
+            desc=f"[Stage II] {candidate.candidate_id} A2C",
+            unit="upd",
+        )
+        t_train = time.perf_counter()
+        try:
+            for _j in range(num_updates):
+                for step in range(algo_args.num_steps):
+                    with torch.no_grad():
+                        rollouts_obs = {k: rollouts.obs[k][step] for k in rollouts.obs}
+                        rollouts_hidden_s = {
+                            k: rollouts.recurrent_hidden_states[k][step]
+                            for k in rollouts.recurrent_hidden_states
+                        }
+                        value, action, action_log_prob, recurrent_hidden_states = (
+                            actor_critic.act(
+                                rollouts_obs, rollouts_hidden_s, rollouts.masks[step]
+                            )
+                        )
+                    obs, reward, done, infos = envs.step(action)
+                    masks = torch.FloatTensor([[0.0] if d else [1.0] for d in done])
+                    bad_masks = torch.FloatTensor(
+                        [[0.0] if "bad_transition" in info else [1.0] for info in infos]
+                    )
+                    rollouts.insert(
+                        obs,
+                        recurrent_hidden_states,
+                        action,
+                        action_log_prob,
+                        value,
+                        reward,
+                        masks,
+                        bad_masks,
+                    )
+
                 with torch.no_grad():
-                    rollouts_obs = {k: rollouts.obs[k][step] for k in rollouts.obs}
+                    rollouts_obs = {k: rollouts.obs[k][-1] for k in rollouts.obs}
                     rollouts_hidden_s = {
-                        k: rollouts.recurrent_hidden_states[k][step]
+                        k: rollouts.recurrent_hidden_states[k][-1]
                         for k in rollouts.recurrent_hidden_states
                     }
-                    value, action, action_log_prob, recurrent_hidden_states = (
-                        actor_critic.act(
-                            rollouts_obs, rollouts_hidden_s, rollouts.masks[step]
-                        )
-                    )
-                obs, reward, done, infos = envs.step(action)
-                masks = torch.FloatTensor([[0.0] if d else [1.0] for d in done])
-                bad_masks = torch.FloatTensor(
-                    [[0.0] if "bad_transition" in info else [1.0] for info in infos]
-                )
-                rollouts.insert(
-                    obs,
-                    recurrent_hidden_states,
-                    action,
-                    action_log_prob,
-                    value,
-                    reward,
-                    masks,
-                    bad_masks,
-                )
+                    next_value = actor_critic.get_value(
+                        rollouts_obs, rollouts_hidden_s, rollouts.masks[-1]
+                    ).detach()
 
-            with torch.no_grad():
-                rollouts_obs = {k: rollouts.obs[k][-1] for k in rollouts.obs}
-                rollouts_hidden_s = {
-                    k: rollouts.recurrent_hidden_states[k][-1]
-                    for k in rollouts.recurrent_hidden_states
-                }
-                next_value = actor_critic.get_value(
-                    rollouts_obs, rollouts_hidden_s, rollouts.masks[-1]
-                ).detach()
-
-            rollouts.compute_returns(
-                next_value,
-                algo_args.use_gae,
-                algo_args.gamma,
-                algo_args.gae_lambda,
-                algo_args.use_proper_time_limits,
+                rollouts.compute_returns(
+                    next_value,
+                    algo_args.use_gae,
+                    algo_args.gamma,
+                    algo_args.gae_lambda,
+                    algo_args.use_proper_time_limits,
+                )
+                agent.update(rollouts)
+                rollouts.after_update()
+                pbar.update(1)
+        except Exception as exc:  # noqa: BLE001
+            console.fail(
+                f"train crashed for {candidate.candidate_id} round={round_index}: {exc}",
+                stage="Stage II",
             )
-            agent.update(rollouts)
-            rollouts.after_update()
+            raise
+        finally:
+            pbar.close()
+        console.status(
+            f"train done for {candidate.candidate_id} in "
+            f"{console.format_seconds(time.perf_counter() - t_train)}; evaluating...",
+            stage="Stage II",
+        )
 
         ckpt_path = os.path.join(ckpt_dir, f"{max(num_updates - 1, 0):05d}.pt")
         torch.save(actor_critic.state_dict(), ckpt_path)
@@ -441,6 +484,10 @@ class RealPolicyTrainer(PolicyTrainer):
         with open(os.path.join(out_dir, "proxy_metrics.txt"), "w", encoding="utf-8") as f:
             f.write(metrics.feedback_text() + "\n")
             f.write(f"checkpoint={ckpt_path}\n")
+        console.status(
+            f"eval {candidate.candidate_id}: {metrics.feedback_text()}",
+            stage="Stage II",
+        )
         return metrics
 
 
@@ -621,13 +668,50 @@ class Stage2Runner:
         self.checkpoint_store = None  # type: ignore[assignment]
         self.checkpoint_seed: int = int(self.config.seed)
 
+    def _repair_invalid_code(
+        self,
+        candidate_id: str,
+        bad_code: str,
+        validation_error: str,
+        metrics: ProxyMetrics,
+    ) -> tuple[Optional[str], Optional[str]]:
+        """
+        Single repair attempt: feed back the exact error and ask LLM to fix.
+        Returns (repaired_code, error) or (None, error_reason) if repair fails.
+        """
+        feedback = metrics.feedback_text()
+        repair_prompt = (
+            f"The following reward function failed validation with this error:\n\n"
+            f"ERROR: {validation_error}\n\n"
+            f"ORIGINAL CODE:\n{bad_code}\n\n"
+            f"Please fix the code to pass validation. Remember:\n"
+            f"- state.robot.px, state.robot.py, state.robot.vx, state.robot.vy, state.robot.radius, state.robot.gx, state.robot.gy, state.robot.v_pref\n"
+            f"- state.humans (iterate with 'for human in state.humans:'), each human.px, human.py, human.vx, human.vy, human.radius\n"
+            f"- state.dmin, state.discomfort_dist (TOP-LEVEL, not under robot)\n"
+            f"- state.collision, state.reaching_goal, state.timeout\n"
+            f"- state.action, state.time_step, state.global_time, state.time_limit\n"
+            f"- NO state.history, NO state.prev_state, NO state.obstacle_dist, NO state.obstacle_distance, NO state.safety_dist\n"
+            f"- Use ** 0.5 for square root (no math module)\n"
+            f"- Signature must be: def compute_reward(state, memory): "
+            f"(memory is a plain dict cleared each episode)\n"
+            f"- No classes, getattr, hasattr, eval, exec, type, or dynamic field access\n\n"
+            f"Return only the corrected function in a Python code block."
+        )
+        full_prompt = f"{D3_SYSTEM_PROMPT}\n\n{repair_prompt}"
+        try:
+            raw = self.llm.complete(full_prompt)
+            repaired_code = normalize_to_compute_reward(extract_python_code(raw))
+            return repaired_code, None
+        except Exception as exc:  # noqa: BLE001
+            return None, str(exc)
+
     def refine_candidate(
         self,
         candidate: RewardCandidate,
         metrics: ProxyMetrics,
     ) -> RewardCandidate:
         """
-        D.3 refinement → ``*_v2``. On sandbox/LLM failure, keep previous and log.
+        D.3 refinement → ``*_v2``. On sandbox failure, attempt ONE repair before keeping previous.
         """
         feedback = metrics.feedback_text()
         user_prompt = format_d3_refinement(
@@ -641,6 +725,10 @@ class Stage2Runner:
             raw = self.llm.complete(full_prompt)
             new_code = normalize_to_compute_reward(extract_python_code(raw))
         except Exception as exc:  # noqa: BLE001
+            console.fail(
+                f"LLM refinement error for {candidate.candidate_id}: {exc}",
+                stage="Stage II",
+            )
             logger.warning(
                 "LLM refinement failed for %s: %s — keeping previous code",
                 candidate.candidate_id,
@@ -664,8 +752,56 @@ class Stage2Runner:
 
         reward_fn, err = self.validator.try_validate(new_code)
         if reward_fn is None:
+            # Attempt repair once before giving up
+            logger.info(
+                "Sandbox rejected refinement for %s: %s — attempting repair",
+                candidate.candidate_id,
+                err,
+            )
+            repaired_code, repair_err = self._repair_invalid_code(
+                candidate.candidate_id, new_code, err, metrics
+            )
+            if repaired_code is not None:
+                reward_fn, repair_validation_err = self.validator.try_validate(
+                    repaired_code
+                )
+                if reward_fn is not None:
+                    logger.info(
+                        "Repair succeeded for %s: validation passed",
+                        candidate.candidate_id,
+                    )
+                    return replace(
+                        candidate,
+                        candidate_id=_v2_candidate_id(candidate.candidate_id),
+                        code=repaired_code,
+                        reward_fn=reward_fn,
+                        valid=True,
+                        validation_error=None,
+                        origin="refinement",
+                        parent_ids=(candidate.candidate_id,),
+                        metadata={
+                            **candidate.metadata,
+                            "refine_kept_previous": False,
+                            "last_metrics": metrics.as_dict(),
+                            "repair_attempted": True,
+                            "repair_succeeded": True,
+                        },
+                    )
+                else:
+                    logger.warning(
+                        "Repair attempted but failed validation for %s: %s",
+                        candidate.candidate_id,
+                        repair_validation_err,
+                    )
+            elif repair_err is not None:
+                logger.warning(
+                    "Repair LLM call failed for %s: %s",
+                    candidate.candidate_id,
+                    repair_err,
+                )
+
             logger.warning(
-                "Sandbox rejected refinement for %s: %s — keeping previous code",
+                "Sandbox rejected refinement for %s (and repair failed): %s — keeping previous code",
                 candidate.candidate_id,
                 err,
             )
@@ -675,6 +811,7 @@ class Stage2Runner:
                     "reason": err,
                     "kept_previous": True,
                     "rejected_code": new_code,
+                    "repair_attempted": True,
                 }
             )
             return replace(
@@ -683,6 +820,8 @@ class Stage2Runner:
                     **candidate.metadata,
                     "refine_kept_previous": True,
                     "refine_error": err,
+                    "repair_attempted": True,
+                    "repair_succeeded": False,
                 },
             )
 
@@ -715,20 +854,27 @@ class Stage2Runner:
                 len(population),
             )
         next_pop: List[RewardCandidate] = []
-        for cand in population:
+        round_records: List[Stage2RoundRecord] = []
+        n = len(population)
+        for i, cand in enumerate(population, start=1):
+            console.status(
+                f"Round {round_index + 1}/{self.config.rounds} - "
+                f"candidate {cand.candidate_id} ({i}/{n})",
+                stage="Stage II",
+            )
             refined, metrics, kept, wall_s, resumed = self._train_refine_one(
                 cand, round_index=round_index
             )
-            self.history.append(
-                Stage2RoundRecord(
-                    round_index=round_index,
-                    candidate_id=cand.candidate_id,
-                    metrics=metrics,
-                    refined=not kept,
-                    kept_previous=kept,
-                    validation_error=refined.metadata.get("refine_error"),
-                )
+            rec = Stage2RoundRecord(
+                round_index=round_index,
+                candidate_id=cand.candidate_id,
+                metrics=metrics,
+                refined=not kept,
+                kept_previous=kept,
+                validation_error=refined.metadata.get("refine_error"),
             )
+            self.history.append(rec)
+            round_records.append(rec)
             if wall_s is not None:
                 refined.metadata = {
                     **(refined.metadata or {}),
@@ -736,6 +882,9 @@ class Stage2Runner:
                     "resumed": resumed,
                 }
             next_pop.append(refined)
+        console.stage_round_summary(
+            "Stage II", round_index, self.config.rounds, round_records
+        )
         return next_pop
 
     def _train_refine_one(
@@ -818,8 +967,13 @@ class Stage2Runner:
 
     def run(self, population: Sequence[RewardCandidate]) -> List[RewardCandidate]:
         """Run G2 refinement rounds; returns final population."""
+        console.banner("Stage II - proxy A2C refinement")
         pop = list(population)
         for r in range(self.config.rounds):
-            logger.info("Stage II round %d/%d", r + 1, self.config.rounds)
+            console.status(
+                f"starting round {r + 1}/{self.config.rounds} "
+                f"(N={len(pop)}, K2={self.config.train_env_steps})",
+                stage="Stage II",
+            )
             pop = self.run_round(pop, round_index=r)
         return pop

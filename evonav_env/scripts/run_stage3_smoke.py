@@ -13,6 +13,7 @@ Example (from ``evonav_env/`` with the project venv active)::
 
     python scripts/run_stage3_smoke.py --no-refine
     python scripts/run_stage3_smoke.py --train-env-steps 200 --eval-episodes 1 --h-sweep 5,10
+    python scripts/run_stage3_smoke.py --no-refine --train-env-steps 100000 --num-processes 1
 """
 
 from __future__ import annotations
@@ -21,10 +22,14 @@ import argparse
 import logging
 import os
 import sys
+import time
 
 _ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
+_BASELINES_ROOT = os.path.abspath(os.path.join(_ROOT, "..", "baselines_openai"))
+if _BASELINES_ROOT not in sys.path:
+    sys.path.insert(0, _BASELINES_ROOT)
 os.chdir(_ROOT)
 
 
@@ -43,6 +48,12 @@ def main() -> int:
     parser.add_argument("--seed", type=int, default=425)
     parser.add_argument("--output-root", type=str, default="trained_models/stage3_smoke")
     parser.add_argument(
+        "--num-processes",
+        type=int,
+        default=None,
+        help="Parallel envs (default: auto min(16, cpu_count-1))",
+    )
+    parser.add_argument(
         "--h-sweep",
         type=str,
         default="5,10,20",
@@ -51,13 +62,16 @@ def main() -> int:
     parser.add_argument("--no-refine", action="store_true")
     parser.add_argument("--no-h-sweep", action="store_true")
     args = parser.parse_args()
-    sys.argv = [sys.argv[0], "--no-cuda", "--num-processes", "1"]
+
+    # Isolate Config.get_args(); num_processes is applied via Stage3Config.
+    sys.argv = [sys.argv[0], "--no-cuda", "--seed", str(args.seed)]
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 
     import crowd_sim  # noqa: F401
     from crowd_nav.reward_search.evolver import RewardCandidate
     from crowd_nav.reward_search.llm import ScriptedLLMClient
+    from crowd_nav.reward_search.parallelism import resolve_num_processes
     from crowd_nav.reward_search.prompts import D5_SEED_FUNCTION
     from crowd_nav.reward_search.sandbox import RewardValidator
     from crowd_nav.reward_search.stage3 import (
@@ -68,6 +82,7 @@ def main() -> int:
     )
 
     human_counts = tuple(int(x) for x in args.h_sweep.split(",") if x.strip())
+    nproc = resolve_num_processes(args.num_processes)
 
     validator = RewardValidator()
     code = D5_SEED_FUNCTION.strip() + "\n"
@@ -98,21 +113,34 @@ def main() -> int:
         output_root=args.output_root,
         device="cpu",
         env_name="CrowdSimVarNum-v0",
+        predict_method="none",
         human_counts=human_counts,
         train_human_num=20,
+        num_processes=nproc,
     )
     logging.info(
-        "Smoke K3=%d (paper=%d); H=%s",
+        "Smoke K3=%d (paper=%d); H=%s; num_processes=%d",
         cfg.train_env_steps,
         STAGE3_PAPER_STEPS,
         human_counts,
+        nproc,
     )
 
     trainer = RealPolicyTrainer()
+    t0 = time.perf_counter()
 
     if args.no_refine:
         bundle = trainer.train_and_eval(pop[0], round_index=0, config=cfg)
+        wall = time.perf_counter() - t0
         logging.info("Smoke metrics: %s", bundle.metrics.feedback_text())
+        logging.info(
+            "Wall-clock: %.2fs | K3=%d | num_processes=%d | "
+            "num_updates=%d (K3 // num_steps // num_processes)",
+            wall,
+            cfg.train_env_steps,
+            nproc,
+            int(cfg.train_env_steps) // int(cfg.num_steps) // nproc,
+        )
         if not args.no_h_sweep:
             report = trainer.evaluate_at_human_counts(
                 pop[0], bundle, config=cfg, human_counts=human_counts
@@ -122,7 +150,7 @@ def main() -> int:
 
     refined = (
         "```python\n"
-        "def compute_reward(state):\n"
+        "def compute_reward(state, memory):\n"
         "    if state.reaching_goal:\n"
         "        return float(10.0)\n"
         "    if state.collision:\n"
@@ -140,6 +168,8 @@ def main() -> int:
         config=cfg,
     )
     out = runner.run(pop, run_h_sweep=not args.no_h_sweep)
+    wall = time.perf_counter() - t0
+    logging.info("Wall-clock: %.2fs | num_processes=%d", wall, nproc)
     for rec in runner.history:
         logging.info(
             "round=%d id=%s refined=%s kept_prev=%s metrics=%s",

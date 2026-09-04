@@ -1,6 +1,5 @@
-numpy==1.20.3
-pandas==1.5.2
-gym==0.15.7
-tensorflow-gpu==2.11.0
-matplotlib==3.6.2
-Cython
+# Legacy alias — install with:
+#   pip install -r requirements_pinned.txt
+#
+# Kept so older docs/scripts that reference requirements.txt still resolve.
+-r requirements_pinned.txt
